@@ -53,6 +53,10 @@ cat > "$BUNDLE_DIR/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
+# Ad-hoc code sign (required for macOS accessibility permission list)
+echo "🔏 Signing..."
+codesign --force --sign - "$APP_DIR"
+
 echo "✅ Done! Run: open $APP_DIR"
 echo ""
 echo "⚠️  初回起動後、以下の許可が必要です:"
