@@ -1,0 +1,5 @@
+.build/
+GravityReader.app/
+.DS_Store
+*.swp
+.claude/
