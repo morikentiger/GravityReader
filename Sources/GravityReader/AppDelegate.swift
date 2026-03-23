@@ -69,6 +69,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.logWindowController?.addEntry("✅ APIキーを設定しました")
         }
 
+        statusBarController?.onVoiceChanged = { [weak self] mode in
+            guard let self = self else { return }
+            self.captureManager?.speechManager.voiceMode = mode
+            switch mode {
+            case .system:
+                self.logWindowController?.addEntry("🔊 音声: システム音声に切り替えました")
+            case .voicevox(let id):
+                self.logWindowController?.addEntry("🔊 音声: VOICEVOX (speaker \(id)) に切り替えました")
+            }
+        }
+
+        // VOICEVOXスピーカー一覧を取得
+        captureManager?.speechManager.fetchVoicevoxSpeakers { [weak self] speakers in
+            guard let self = self else { return }
+            let currentMode = self.captureManager?.speechManager.voiceMode ?? .system
+            self.statusBarController?.refreshVoicevoxSpeakers(speakers, currentMode: currentMode)
+        }
+
         // Editメニュー追加（Cmd+V等を有効にする）
         let mainMenu = NSMenu()
         let editMenuItem = NSMenuItem()

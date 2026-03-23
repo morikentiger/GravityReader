@@ -12,6 +12,10 @@ class StatusBarController {
     var onTest: (() -> Void)?
     var onShowLog: (() -> Void)?
     var onSetAPIKey: ((String) -> Void)?
+    var onVoiceChanged: ((VoiceMode) -> Void)?
+
+    private var voiceSubmenu: NSMenu!
+    private var voiceMenuItem: NSMenuItem!
 
     init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -54,6 +58,25 @@ class StatusBarController {
         let apiKeyItem = NSMenuItem(title: "🔑 APIキー設定", action: #selector(setAPIKey), keyEquivalent: "k")
         apiKeyItem.target = self
         menu.addItem(apiKeyItem)
+
+        // 音声選択サブメニュー
+        voiceSubmenu = NSMenu()
+        let systemItem = NSMenuItem(title: "✓ システム音声（デフォルト）", action: #selector(selectSystemVoice), keyEquivalent: "")
+        systemItem.target = self
+        systemItem.tag = -1
+        voiceSubmenu.addItem(systemItem)
+        voiceSubmenu.addItem(.separator())
+        let voicevoxHeader = NSMenuItem(title: "── VOICEVOX ──", action: nil, keyEquivalent: "")
+        voicevoxHeader.isEnabled = false
+        voiceSubmenu.addItem(voicevoxHeader)
+        let loadingItem = NSMenuItem(title: "接続中...", action: nil, keyEquivalent: "")
+        loadingItem.isEnabled = false
+        loadingItem.tag = -99
+        voiceSubmenu.addItem(loadingItem)
+
+        voiceMenuItem = NSMenuItem(title: "🎤 音声選択", action: nil, keyEquivalent: "")
+        voiceMenuItem.submenu = voiceSubmenu
+        menu.addItem(voiceMenuItem)
 
         menu.addItem(.separator())
 
@@ -154,6 +177,72 @@ class StatusBarController {
             statusItem.button?.title = "📖"
         }
         onToggle?(isRunning)
+    }
+
+    // MARK: - Voice selection
+
+    @objc private func selectSystemVoice() {
+        updateVoiceCheckmark(tag: -1)
+        onVoiceChanged?(.system)
+    }
+
+    @objc private func selectVoicevoxSpeaker(_ sender: NSMenuItem) {
+        let speakerID = sender.tag
+        updateVoiceCheckmark(tag: speakerID)
+        onVoiceChanged?(.voicevox(speakerID))
+    }
+
+    private func updateVoiceCheckmark(tag: Int) {
+        for item in voiceSubmenu.items {
+            if item.tag == -1 {
+                item.title = tag == -1 ? "✓ システム音声（デフォルト）" : "  システム音声（デフォルト）"
+            } else if item.tag >= 0 {
+                let base = item.representedObject as? String ?? item.title
+                item.title = item.tag == tag ? "✓ \(base)" : "  \(base)"
+            }
+        }
+    }
+
+    func refreshVoicevoxSpeakers(_ speakers: [VoicevoxSpeaker], currentMode: VoiceMode) {
+        // "接続中..." を削除
+        if let loading = voiceSubmenu.items.first(where: { $0.tag == -99 }) {
+            voiceSubmenu.removeItem(loading)
+        }
+        // 既存のVOICEVOXアイテムを削除（tag >= 0）
+        for item in voiceSubmenu.items.reversed() {
+            if item.tag >= 0 { voiceSubmenu.removeItem(item) }
+        }
+
+        if speakers.isEmpty {
+            let noConn = NSMenuItem(title: "未接続（VOICEVOXを起動してください）", action: nil, keyEquivalent: "")
+            noConn.isEnabled = false
+            noConn.tag = -98
+            voiceSubmenu.addItem(noConn)
+            return
+        }
+
+        // 既存の未接続メッセージを削除
+        if let noConn = voiceSubmenu.items.first(where: { $0.tag == -98 }) {
+            voiceSubmenu.removeItem(noConn)
+        }
+
+        let currentTag: Int
+        if case .voicevox(let id) = currentMode { currentTag = id } else { currentTag = -1 }
+
+        for speaker in speakers {
+            let label = "\(speaker.name)（\(speaker.style)）"
+            let prefix = speaker.id == currentTag ? "✓ " : "  "
+            let item = NSMenuItem(title: "\(prefix)\(label)", action: #selector(selectVoicevoxSpeaker(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = speaker.id
+            item.representedObject = label
+            voiceSubmenu.addItem(item)
+        }
+
+        // システム音声のチェック更新
+        if let sysItem = voiceSubmenu.items.first(where: { $0.tag == -1 }) {
+            sysItem.title = currentTag == -1 ? "✓ システム音声（デフォルト）" : "  システム音声（デフォルト）"
+        }
     }
 
     func setStatus(_ text: String) {
