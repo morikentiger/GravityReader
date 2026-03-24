@@ -15,12 +15,19 @@ struct VoicevoxSpeaker {
 class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
     private var audioPlayer: AVAudioPlayer?
-    private var queue: [String] = []
+    private var queue: [(text: String, voice: VoiceMode)] = []
     private(set) var isSpeaking = false
 
+    /// デフォルト音声（メニューで選択されたもの）
     var voiceMode: VoiceMode = .system {
         didSet { UserDefaults.standard.set(voiceModeToString(voiceMode), forKey: "GR_VoiceMode") }
     }
+
+    /// ユーザー別ボイス割り当て（ユーザー名 → VoiceMode）
+    private var userVoiceMap: [String: VoiceMode] = [:]
+
+    /// キャッシュされたスピーカー一覧
+    private(set) var cachedSpeakers: [VoicevoxSpeaker] = []
 
     var onSpeakingStateChanged: ((Bool) -> Void)?
     var onLog: ((String) -> Void)?
@@ -35,12 +42,26 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         if let saved = UserDefaults.standard.string(forKey: "GR_VoiceMode") {
             voiceMode = stringToVoiceMode(saved)
         }
+        // ユーザー別ボイス設定を復元
+        if let savedMap = UserDefaults.standard.dictionary(forKey: "GR_UserVoiceMap") as? [String: String] {
+            for (user, modeStr) in savedMap {
+                userVoiceMap[user] = stringToVoiceMode(modeStr)
+            }
+        }
     }
 
     // MARK: - Public
 
+    /// テキストをデフォルト音声で読み上げ
     func speak(_ text: String) {
-        queue.append(text)
+        queue.append((text: text, voice: voiceMode))
+        speakNext()
+    }
+
+    /// テキストをユーザー固有音声で読み上げ（未設定ならデフォルト）
+    func speak(_ text: String, forUser user: String) {
+        let voice = userVoiceMap[user] ?? voiceMode
+        queue.append((text: text, voice: voice))
         speakNext()
     }
 
@@ -53,13 +74,61 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         onSpeakingStateChanged?(false)
     }
 
+    // MARK: - ユーザー別ボイス管理
+
+    /// ユーザーにVOICEVOX音声を割り当て
+    func setVoiceForUser(_ userName: String, mode: VoiceMode) {
+        userVoiceMap[userName] = mode
+        saveUserVoiceMap()
+    }
+
+    /// ユーザーのボイス割り当てを取得
+    func voiceForUser(_ userName: String) -> VoiceMode {
+        return userVoiceMap[userName] ?? voiceMode
+    }
+
+    /// 全ユーザーのボイス割り当てを取得
+    func allUserVoiceAssignments() -> [String: VoiceMode] {
+        return userVoiceMap
+    }
+
+    /// スピーカー名からIDを検索（部分一致）
+    func findSpeakerByName(_ name: String) -> VoicevoxSpeaker? {
+        let lower = name.lowercased()
+        // 完全一致（名前）を優先
+        if let exact = cachedSpeakers.first(where: { $0.name.lowercased() == lower }) {
+            return exact
+        }
+        // 部分一致
+        if let partial = cachedSpeakers.first(where: { $0.name.lowercased().contains(lower) }) {
+            return partial
+        }
+        // スタイル含めて検索
+        if let styleMatch = cachedSpeakers.first(where: {
+            "\($0.name)\($0.style)".lowercased().contains(lower)
+        }) {
+            return styleMatch
+        }
+        return nil
+    }
+
+    private func saveUserVoiceMap() {
+        var dict: [String: String] = [:]
+        for (user, mode) in userVoiceMap {
+            dict[user] = voiceModeToString(mode)
+        }
+        UserDefaults.standard.set(dict, forKey: "GR_UserVoiceMap")
+    }
+
+    // MARK: - VOICEVOX スピーカー取得
+
     /// VOICEVOXエンジンから利用可能なスピーカー一覧を取得
     func fetchVoicevoxSpeakers(completion: @escaping ([VoicevoxSpeaker]) -> Void) {
         guard let url = URL(string: "\(voicevoxBaseURL)/speakers") else {
             completion([])
             return
         }
-        URLSession.shared.dataTask(with: url) { data, _, error in
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
             guard let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
                 completion([])
@@ -75,7 +144,10 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
                     speakers.append(VoicevoxSpeaker(id: id, name: name, style: styleName))
                 }
             }
-            DispatchQueue.main.async { completion(speakers) }
+            DispatchQueue.main.async {
+                self?.cachedSpeakers = speakers
+                completion(speakers)
+            }
         }.resume()
     }
 
@@ -83,15 +155,15 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     private func speakNext() {
         guard !isSpeaking, !queue.isEmpty else { return }
-        let text = queue.removeFirst()
+        let item = queue.removeFirst()
         isSpeaking = true
         onSpeakingStateChanged?(true)
 
-        switch voiceMode {
+        switch item.voice {
         case .system:
-            speakWithSystem(text)
+            speakWithSystem(item.text)
         case .voicevox(let speakerID):
-            speakWithVoicevox(text, speaker: speakerID)
+            speakWithVoicevox(item.text, speaker: speakerID)
         }
     }
 
@@ -105,7 +177,6 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     private func speakWithVoicevox(_ text: String, speaker: Int) {
-        // Step 1: audio_query
         let encodedText = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
         guard let queryURL = URL(string: "\(voicevoxBaseURL)/audio_query?text=\(encodedText)&speaker=\(speaker)") else {
             finishCurrentAndNext()
@@ -118,13 +189,11 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
             guard let self = self, let queryData = data, error == nil else {
                 DispatchQueue.main.async {
                     self?.onLog?("⚠️ VOICEVOX接続エラー — エンジンが起動しているか確認してください")
-                    // フォールバック: システム音声で読む
                     self?.speakWithSystem(text)
                 }
                 return
             }
 
-            // Step 2: synthesis
             guard let synthURL = URL(string: "\(self.voicevoxBaseURL)/synthesis?speaker=\(speaker)") else {
                 DispatchQueue.main.async { self.finishCurrentAndNext() }
                 return

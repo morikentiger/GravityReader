@@ -1,5 +1,15 @@
 import AppKit
 
+/// NSMenuItemのrepresentedObject用（ユーザー名+VoiceMode）
+class UserVoiceSelection: NSObject {
+    let user: String
+    let mode: VoiceMode
+    init(user: String, mode: VoiceMode) {
+        self.user = user
+        self.mode = mode
+    }
+}
+
 class StatusBarController {
     private let statusItem: NSStatusItem
     private let menu: NSMenu
@@ -13,9 +23,19 @@ class StatusBarController {
     var onShowLog: (() -> Void)?
     var onSetAPIKey: ((String) -> Void)?
     var onVoiceChanged: ((VoiceMode) -> Void)?
+    var onFrequencyChanged: ((YUiFrequency) -> Void)?
+    var onUserVoiceChanged: ((String, VoiceMode) -> Void)?
 
     private var voiceSubmenu: NSMenu!
     private var voiceMenuItem: NSMenuItem!
+    private var frequencySubmenu: NSMenu!
+    private var userVoiceMenuItem: NSMenuItem!
+    private var userVoiceSubmenu: NSMenu!
+
+    /// VOICEVOX スピーカー一覧のキャッシュ
+    private var speakersCache: [VoicevoxSpeaker] = []
+    /// 現在のユーザー別ボイス割り当て取得用
+    var getUserVoice: ((String) -> VoiceMode)?
 
     init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -59,6 +79,20 @@ class StatusBarController {
         apiKeyItem.target = self
         menu.addItem(apiKeyItem)
 
+        // YUi応答頻度サブメニュー
+        frequencySubmenu = NSMenu()
+        let currentFreq = YUiFrequency(rawValue: UserDefaults.standard.string(forKey: "YUiFrequency") ?? "") ?? .high
+        for freq in YUiFrequency.allCases {
+            let prefix = freq == currentFreq ? "✓ " : "  "
+            let item = NSMenuItem(title: "\(prefix)\(freq.rawValue)", action: #selector(selectFrequency(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = freq
+            frequencySubmenu.addItem(item)
+        }
+        let freqMenuItem = NSMenuItem(title: "⏱ YUi応答頻度", action: nil, keyEquivalent: "")
+        freqMenuItem.submenu = frequencySubmenu
+        menu.addItem(freqMenuItem)
+
         // 音声選択サブメニュー
         voiceSubmenu = NSMenu()
         let systemItem = NSMenuItem(title: "✓ システム音声（デフォルト）", action: #selector(selectSystemVoice), keyEquivalent: "")
@@ -74,9 +108,19 @@ class StatusBarController {
         loadingItem.tag = -99
         voiceSubmenu.addItem(loadingItem)
 
-        voiceMenuItem = NSMenuItem(title: "🎤 音声選択", action: nil, keyEquivalent: "")
+        voiceMenuItem = NSMenuItem(title: "🎤 デフォルト音声", action: nil, keyEquivalent: "")
         voiceMenuItem.submenu = voiceSubmenu
         menu.addItem(voiceMenuItem)
+
+        // ユーザー別音声サブメニュー
+        userVoiceSubmenu = NSMenu()
+        let noUsersItem = NSMenuItem(title: "（読み上げ開始後にユーザーが表示されます）", action: nil, keyEquivalent: "")
+        noUsersItem.isEnabled = false
+        noUsersItem.tag = -100
+        userVoiceSubmenu.addItem(noUsersItem)
+        userVoiceMenuItem = NSMenuItem(title: "👥 ユーザー別音声", action: nil, keyEquivalent: "")
+        userVoiceMenuItem.submenu = userVoiceSubmenu
+        menu.addItem(userVoiceMenuItem)
 
         menu.addItem(.separator())
 
@@ -141,7 +185,6 @@ class StatusBarController {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        // Store reference so window isn't deallocated
         apiKeyWindow = window
         apiKeyInput = input
     }
@@ -179,6 +222,20 @@ class StatusBarController {
         onToggle?(isRunning)
     }
 
+    // MARK: - Frequency selection
+
+    @objc private func selectFrequency(_ sender: NSMenuItem) {
+        guard let freq = sender.representedObject as? YUiFrequency else { return }
+        // チェックマーク更新
+        for item in frequencySubmenu.items {
+            if let itemFreq = item.representedObject as? YUiFrequency {
+                let prefix = itemFreq == freq ? "✓ " : "  "
+                item.title = "\(prefix)\(itemFreq.rawValue)"
+            }
+        }
+        onFrequencyChanged?(freq)
+    }
+
     // MARK: - Voice selection
 
     @objc private func selectSystemVoice() {
@@ -203,12 +260,86 @@ class StatusBarController {
         }
     }
 
+    // MARK: - User voice menu
+
+    /// 検出済みユーザー一覧でメニューを更新
+    func refreshUserList(_ users: [String]) {
+        userVoiceSubmenu.removeAllItems()
+
+        if users.isEmpty {
+            let noUsersItem = NSMenuItem(title: "（読み上げ開始後にユーザーが表示されます）", action: nil, keyEquivalent: "")
+            noUsersItem.isEnabled = false
+            userVoiceSubmenu.addItem(noUsersItem)
+            return
+        }
+
+        // もりけん（ホスト）を先頭に追加
+        let morickenItem = NSMenuItem(title: "もりけん", action: nil, keyEquivalent: "")
+        let morickenSub = buildVoicePickerSubmenu(forUser: "もりけん")
+        morickenItem.submenu = morickenSub
+        userVoiceSubmenu.addItem(morickenItem)
+        userVoiceSubmenu.addItem(.separator())
+
+        for user in users {
+            let currentVoice = getUserVoice?(user) ?? .system
+            let voiceLabel = voiceLabelFor(currentVoice)
+            let item = NSMenuItem(title: "\(user)  [\(voiceLabel)]", action: nil, keyEquivalent: "")
+            let sub = buildVoicePickerSubmenu(forUser: user)
+            item.submenu = sub
+            userVoiceSubmenu.addItem(item)
+        }
+    }
+
+    private func buildVoicePickerSubmenu(forUser user: String) -> NSMenu {
+        let sub = NSMenu()
+        let currentVoice = getUserVoice?(user) ?? .system
+
+        // システム音声
+        let sysPrefix = currentVoice == .system ? "✓ " : "  "
+        let sysItem = NSMenuItem(title: "\(sysPrefix)システム音声", action: #selector(selectUserVoice(_:)), keyEquivalent: "")
+        sysItem.target = self
+        sysItem.representedObject = UserVoiceSelection(user: user, mode: .system)
+        sub.addItem(sysItem)
+
+        sub.addItem(.separator())
+
+        // VOICEVOXスピーカー
+        for speaker in speakersCache {
+            let label = "\(speaker.name)（\(speaker.style)）"
+            let isSelected = currentVoice == .voicevox(speaker.id)
+            let prefix = isSelected ? "✓ " : "  "
+            let item = NSMenuItem(title: "\(prefix)\(label)", action: #selector(selectUserVoice(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = UserVoiceSelection(user: user, mode: .voicevox(speaker.id))
+            sub.addItem(item)
+        }
+
+        return sub
+    }
+
+    private func voiceLabelFor(_ mode: VoiceMode) -> String {
+        switch mode {
+        case .system: return "システム"
+        case .voicevox(let id):
+            if let s = speakersCache.first(where: { $0.id == id }) {
+                return "\(s.name)"
+            }
+            return "VOICEVOX \(id)"
+        }
+    }
+
+    @objc private func selectUserVoice(_ sender: NSMenuItem) {
+        guard let sel = sender.representedObject as? UserVoiceSelection else { return }
+        onUserVoiceChanged?(sel.user, sel.mode)
+    }
+
+    // MARK: - VOICEVOX speakers
+
     func refreshVoicevoxSpeakers(_ speakers: [VoicevoxSpeaker], currentMode: VoiceMode) {
-        // "接続中..." を削除
+        speakersCache = speakers
         if let loading = voiceSubmenu.items.first(where: { $0.tag == -99 }) {
             voiceSubmenu.removeItem(loading)
         }
-        // 既存のVOICEVOXアイテムを削除（tag >= 0）
         for item in voiceSubmenu.items.reversed() {
             if item.tag >= 0 { voiceSubmenu.removeItem(item) }
         }
@@ -221,7 +352,6 @@ class StatusBarController {
             return
         }
 
-        // 既存の未接続メッセージを削除
         if let noConn = voiceSubmenu.items.first(where: { $0.tag == -98 }) {
             voiceSubmenu.removeItem(noConn)
         }
@@ -239,7 +369,6 @@ class StatusBarController {
             voiceSubmenu.addItem(item)
         }
 
-        // システム音声のチェック更新
         if let sysItem = voiceSubmenu.items.first(where: { $0.tag == -1 }) {
             sysItem.title = currentTag == -1 ? "✓ システム音声（デフォルト）" : "  システム音声（デフォルト）"
         }

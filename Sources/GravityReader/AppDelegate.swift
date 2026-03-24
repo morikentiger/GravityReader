@@ -29,10 +29,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 音声文字起こし（スペースキー長押し）
         voiceManager = VoiceTranscriptionManager()
         voiceManager?.onTranscription = { [weak self] text in
-            let entry = "🎤 ホスト: \(text)"
+            let entry = "🎤 もりけん: \(text)"
             self?.logWindowController?.addEntry(entry, isYUi: false)
-            self?.captureManager?.speakText(text)
-            self?.yuiManager?.feedMessage("ホスト: \(text)")
+            self?.captureManager?.speechManager.speak(text, forUser: "もりけん")
+            self?.yuiManager?.feedMessage("もりけん: \(text)")
         }
         voiceManager?.onLog = { [weak self] message in
             self?.logWindowController?.addEntry(message)
@@ -74,10 +74,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self.captureManager?.speechManager.voiceMode = mode
             switch mode {
             case .system:
-                self.logWindowController?.addEntry("🔊 音声: システム音声に切り替えました")
+                self.logWindowController?.addEntry("🔊 デフォルト音声: システム音声に切り替えました")
             case .voicevox(let id):
-                self.logWindowController?.addEntry("🔊 音声: VOICEVOX (speaker \(id)) に切り替えました")
+                let name = self.captureManager?.speechManager.cachedSpeakers.first(where: { $0.id == id })
+                let label = name.map { "\($0.name)（\($0.style)）" } ?? "speaker \(id)"
+                self.logWindowController?.addEntry("🔊 デフォルト音声: \(label) に切り替えました")
             }
+        }
+
+        statusBarController?.onFrequencyChanged = { [weak self] freq in
+            self?.yuiManager?.frequency = freq
+            self?.logWindowController?.addEntry("⏱ YUi応答頻度: \(freq.rawValue) に変更しました")
+        }
+
+        // ユーザー別音声変更コールバック（メニューから）
+        statusBarController?.onUserVoiceChanged = { [weak self] user, mode in
+            guard let self = self else { return }
+            self.captureManager?.speechManager.setVoiceForUser(user, mode: mode)
+            let label: String
+            switch mode {
+            case .system: label = "システム音声"
+            case .voicevox(let id):
+                let s = self.captureManager?.speechManager.cachedSpeakers.first(where: { $0.id == id })
+                label = s.map { "\($0.name)（\($0.style)）" } ?? "VOICEVOX \(id)"
+            }
+            self.logWindowController?.addEntry("🎤 \(user) の声を \(label) に変更しました")
+            // メニュー再描画
+            if let users = self.captureManager?.detectedUsers {
+                self.statusBarController?.refreshUserList(users)
+            }
+        }
+
+        // ユーザーのボイス取得用
+        statusBarController?.getUserVoice = { [weak self] user in
+            self?.captureManager?.speechManager.voiceForUser(user) ?? .system
+        }
+
+        // ユーザー一覧が更新されたらメニューに反映
+        captureManager?.onUsersUpdated = { [weak self] users in
+            self?.statusBarController?.refreshUserList(users)
         }
 
         // VOICEVOXスピーカー一覧を取得
