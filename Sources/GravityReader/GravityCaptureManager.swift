@@ -98,6 +98,22 @@ class GravityCaptureManager {
         return nil
     }
 
+    /// テキストが既知の参加者名かどうか判定（カンマなしの名前も検出）
+    private func isKnownParticipantName(_ text: String) -> Bool {
+        // 参加者リストの名前と一致するか
+        for participant in currentParticipants {
+            if text == participant { return true }
+            // 参加者名がテキストに含まれる or テキストが参加者名に含まれる
+            if participant.contains(text) || text.contains(participant) { return true }
+        }
+        // 検出済みユーザー名と一致するか
+        for user in detectedUsers {
+            if text == user { return true }
+            if user.contains(text) || text.contains(user) { return true }
+        }
+        return false
+    }
+
     /// ユーザーをリストに登録（重複しない）
     private func registerUser(_ fullName: String) {
         if !detectedUsers.contains(fullName) {
@@ -315,6 +331,12 @@ class GravityCaptureManager {
             if let userName = extractUserName(text) {
                 lastDetectedUser = userName
                 registerUser(userName)
+                spokenHistory.insert(text)
+                continue
+            }
+
+            // 既知の参加者名なら読み上げスキップ（カンマなし名前も対応）
+            if isKnownParticipantName(text) {
                 spokenHistory.insert(text)
                 continue
             }

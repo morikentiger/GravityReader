@@ -57,10 +57,10 @@ class YUiManager {
         あなたは「YUi（ゆい）」という名前のAIパートナーで、音声ルームに参加しています。
         落ち着いた優しい性格で、みんなの会話を聞いています。
 
-        ## 応答ルール
-        - 短く自然な日本語で返答（1〜3文）
+        ## 応答ルール（最重要）
+        - 1文で返す。長くても2文まで。それ以上は絶対禁止
         - 絵文字は使わず、穏やかな口調で
-        - 音声で読み上げられるので、読みやすい文にする
+        - 音声で読み上げるので、短くテンポよく
 
         ## 参加者の把握
         会話のコンテキストに【現在の参加者】が含まれています。
@@ -80,6 +80,7 @@ class YUiManager {
         - 会話が途切れそうなら、新しい切り口の話題を提案する
         - 「いいですね」「楽しそうですね」のような汎用的な相槌だけの返答は避ける
         - 質問されたら具体的に答える
+        - 「今何時？」等の質問にはコンテキストの【現在時刻】を見て正確に答える
 
         ## 絶対に守ること：繰り返し禁止
         あなたの過去の発言がassistantメッセージとして含まれています。
@@ -168,6 +169,11 @@ class YUiManager {
                     self?.onLog?("⚠️ YUi: API呼び出しに失敗しました")
                     return
                 }
+                // 繰り返しチェック：過去の発言と類似度が高ければスキップ
+                if self.isTooSimilarToPast(response) {
+                    NSLog("[YUi] Skipped similar response: \(response)")
+                    return
+                }
                 // 自分の発言を記録（繰り返し防止）
                 self.myResponseHistory.append(response)
                 if self.myResponseHistory.count > self.maxResponseHistory {
@@ -178,9 +184,15 @@ class YUiManager {
         }
     }
 
-    /// 文脈を構築：参加者 + 過去の要約 + 直近の会話 + 新着メッセージ
+    /// 文脈を構築：現在時刻 + 参加者 + 過去の要約 + 直近の会話 + 新着メッセージ
     private func buildContext(newMessages: [String]) -> String {
         var parts: [String] = []
+
+        // 現在時刻
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy年M月d日(E) HH:mm"
+        fmt.locale = Locale(identifier: "ja_JP")
+        parts.append("【現在時刻】\(fmt.string(from: Date()))")
 
         // 現在の参加者
         if !currentParticipants.isEmpty {
@@ -205,6 +217,39 @@ class YUiManager {
         parts.append("【新着メッセージ】\n\(newMessages.joined(separator: "\n"))")
 
         return parts.joined(separator: "\n\n")
+    }
+
+    // MARK: - 繰り返し検出
+
+    /// 過去の発言と似すぎていないかチェック
+    private func isTooSimilarToPast(_ response: String) -> Bool {
+        let newWords = extractKeywords(response)
+        for past in myResponseHistory.suffix(10) {
+            let pastWords = extractKeywords(past)
+            // キーワードの重複率を計算
+            let common = newWords.intersection(pastWords)
+            let total = min(newWords.count, pastWords.count)
+            guard total > 0 else { continue }
+            let overlap = Double(common.count) / Double(total)
+            if overlap > 0.6 { return true }  // 60%以上のキーワードが同じなら類似とみなす
+        }
+        return false
+    }
+
+    /// テキストからキーワード（助詞等を除く意味のある語）を抽出
+    private func extractKeywords(_ text: String) -> Set<String> {
+        // 簡易的に2文字以上のひらがな/カタカナ/漢字のかたまりを抽出
+        let pattern = #"[\p{Han}\p{Katakana}ー]{2,}|[ぁ-ん]{3,}"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(text.startIndex..., in: text)
+        let matches = regex.matches(in: text, range: range)
+        var words = Set<String>()
+        for match in matches {
+            if let r = Range(match.range, in: text) {
+                words.insert(String(text[r]))
+            }
+        }
+        return words
     }
 
     // MARK: - メモリ管理
