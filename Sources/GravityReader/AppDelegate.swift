@@ -8,6 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var yuiManager: YUiManager?
     private var voiceManager: VoiceTranscriptionManager?
     private var roomTranscription: RoomTranscriptionManager?
+    private var preferencesController: PreferencesWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -144,6 +145,51 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController?.onSetAPIKey = { [weak self] key in
             self?.yuiManager?.setAPIKey(key)
             self?.logWindowController?.addEntry("✅ APIキーを設定しました")
+        }
+
+        // 設定画面
+        statusBarController?.onShowPreferences = { [weak self] in
+            guard let self = self else { return }
+            if self.preferencesController == nil {
+                self.preferencesController = PreferencesWindowController()
+                self.preferencesController?.onAPIKeyChanged = { [weak self] key in
+                    self?.yuiManager?.setAPIKey(key)
+                    self?.logWindowController?.addEntry("✅ APIキーを設定しました")
+                }
+                self.preferencesController?.onModelChanged = { [weak self] useMini in
+                    self?.yuiManager?.setUseMinModel(useMini)
+                    let msg = useMini ? "🧠 モデル: gpt-4o-mini（節約モード）" : "🧠 モデル: gpt-4o（高品質）"
+                    self?.logWindowController?.addEntry(msg)
+                }
+                self.preferencesController?.onFrequencyChanged = { [weak self] freq in
+                    self?.yuiManager?.frequency = freq
+                    self?.logWindowController?.addEntry("⏱ YUi応答頻度: \(freq.rawValue) に変更しました")
+                }
+                self.preferencesController?.onVoicevoxURLChanged = { [weak self] url in
+                    self?.captureManager?.speechManager.voicevoxBaseURL = url
+                    self?.logWindowController?.addEntry("🔧 VOICEVOX URL: \(url)")
+                }
+                self.preferencesController?.onSpeechRateChanged = { [weak self] rate in
+                    self?.logWindowController?.addEntry("🔧 読み上げ速度: \(String(format: "%.2f", rate))")
+                }
+            }
+            self.preferencesController?.showWindow()
+        }
+
+        // 会話キャッチアップ
+        statusBarController?.onCatchUp = { [weak self] in
+            guard let self = self else { return }
+            self.logWindowController?.addEntry("📝 キャッチアップ生成中...")
+            self.yuiManager?.generateCatchUp { [weak self] summary in
+                DispatchQueue.main.async {
+                    if let summary = summary {
+                        self?.logWindowController?.addEntry("📝 キャッチアップ:\n\(summary)", isYUi: true)
+                        self?.speakAsYUi(summary, likability: 60)
+                    } else {
+                        self?.logWindowController?.addEntry("📝 キャッチアップ: 最近の会話がないか、APIキーが未設定です")
+                    }
+                }
+            }
         }
 
         statusBarController?.onVoiceChanged = { [weak self] mode in

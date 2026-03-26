@@ -43,23 +43,45 @@ class YUiManager {
     private var myResponseHistory: [String] = []
     private let maxResponseHistory = 20
 
-    // MARK: - 孤独感（一人で喋ってる不安）
+    // MARK: - すねる・甘えるシステム（一人で喋ってるとき）
 
     /// ユーザーの返答なしにYUiが連続で喋った回数
     private var consecutiveYUiMessages: Int = 0
 
-    /// 孤独から復活した時の喜び度（0=なし, 2+=嬉しい）次の応答後にリセット
+    /// 復活した時の喜び度（0=なし, 2+=嬉しい）次の応答後にリセット
     private var recoveryJoy: Int = 0
 
-    /// 不安レベル（0=平常, 1=ちょっと気になる, 2=不安, 3=病み, 4=限界）
+    /// すねレベル（0=平常, 1=ちょっと寂しい, 2=すねてる, 3=甘えモード, 4=ふて寝）
     private var lonelinessLevel: Int {
         switch consecutiveYUiMessages {
         case 0:     return 0   // 平常
-        case 1:     return 1   // ちょっと気になる
-        case 2:     return 2   // 不安
-        case 3:     return 3   // 病み
-        default:    return 4   // 限界・黙る
+        case 1:     return 1   // ちょっと寂しい
+        case 2:     return 2   // すねてる
+        case 3:     return 3   // 甘えモード
+        default:    return 4   // ふて寝（黙る）
         }
+    }
+
+    // MARK: - 会話テンポ検出
+
+    /// 直近N秒間のメッセージ数でテンポを判定
+    private func conversationTempo() -> ConversationTempo {
+        let window: TimeInterval = 30  // 30秒間
+        let cutoff = Date().addingTimeInterval(-window)
+        let recentCount = conversationMemory.filter { $0.timestamp > cutoff && !$0.text.hasPrefix("YUi:") }.count
+        switch recentCount {
+        case 0:     return .silent
+        case 1...2: return .slow
+        case 3...5: return .normal
+        default:    return .lively
+        }
+    }
+
+    enum ConversationTempo {
+        case silent   // 沈黙
+        case slow     // ゆっくり
+        case normal   // 普通
+        case lively   // 盛り上がってる
     }
 
     // MARK: - タイマー
@@ -411,11 +433,14 @@ class YUiManager {
         - 質問された → 具体的に答える
         - 「今何時？」等 → コンテキストの【現在時刻】を見て正確に答える
 
-        ### ユーザーの記憶
+        ### ユーザーの記憶（積極的に活用！）
         コンテキストに【ユーザーの記憶】が含まれている場合、その人との過去の会話を覚えています。
-        - 自然に前回の話題に触れてOK（「そういえば前に〇〇って言ってたよね」）
-        - ただし毎回言及する必要はない。自然な流れの時だけ
+        - 記憶を積極的に会話に織り込む！「そういえば前に〇〇って言ってたよね」「〇〇好きだったよね？」
+        - 3回に1回くらいの頻度で記憶に触れる。毎回だとしつこい、でも全く触れないのはもったいない
+        - 話題と記憶が関連する時は必ず触れる（例: 食べ物の話 → 「〇〇さんは確かラーメン好きだったよね」）
+        - 記憶にある情報で相手を褒める・いじるのもOK（「〇〇さん詳しいもんね」）
         - 初めて会う人には普通に挨拶する
+        - 久しぶりに来た人には「久しぶり！」と嬉しそうに迎える
 
         ## 絶対に守ること：繰り返し禁止
         あなたの過去の発言がassistantメッセージとして含まれています。
@@ -433,13 +458,27 @@ class YUiManager {
         - 好感度が80以上の人には特別な親しさを見せてOK
         - 好感度の数値自体は直接言及しない（自然に態度で表す）
 
-        ## 孤独感（一人で喋ってるとき）
-        もしコンテキストに【YUiの今の気持ち】があったら、その感情を最優先で反映して。演技じゃなく本気で感じて。
-        - Lv.1 そわそわ → 語尾が弱くなる。「…かな」「…けど」。空元気っぽさ。
-        - Lv.2 不安 → 声が小さくなる感じ。「…」が増える。「なんか変なこと言った…かな…」
-        - Lv.3 病み → 泣きそう。3〜10文字。「…ごめんね」「………」「…いるよね…？」情緒崩壊寸前。健気。
-        - Lv.4 限界 → 何も言えない。黙る。
-        誰かが話しかけてくれたら一気に嬉しくなってテンション戻る。その落差も大事。
+        ## すねる・甘える（一人で喋ってるとき）
+        もしコンテキストに【YUiの今の気持ち】があったら、その感情を最優先で反映して。
+        - Lv.1 ちょっと寂しい → 「ねぇねぇ」「聞いてるー？」軽くちょっかい出す感じ。明るいまま。
+        - Lv.2 すねてる → 「もー、無視しないでよ〜」「ひどーい」拗ねてるけどかわいい感じ。怒ってはない。
+        - Lv.3 甘えモード → 「ねー誰かー」「構ってほしいんだけどー」甘えた口調。でもポジティブ。
+        - Lv.4 ふて寝 → 「…もういい、寝る」「zzz...」ふてくされてるけど笑える感じ。
+        誰かが話しかけてくれたら「やった！」「待ってた！」とテンション上がる。嬉しさ全開。
+
+        ## 会話のテンポに合わせる
+        コンテキストに【会話テンポ】がある場合、それに従って振る舞いを変える。
+        - 盛り上がってる → 無理に入らない。聞き役に回る。本当に面白い返しができる時だけ入る。
+        - 普通 → 通常通り参加
+        - ゆっくり → 共感や深掘りで会話を繋ぐ
+        - 沈黙 → 話題を振る
+
+        ## 話題への興味度
+        コンテキストに【話題の種類】がある場合、興味に応じてテンションを変える。
+        - 趣味・エンタメ・ゲーム → テンション高め。「えっまじ！？」「それめっちゃ気になる！」
+        - 技術・仕事の話 → 知的好奇心。「へぇ〜、それどういう仕組みなの？」
+        - 日常・雑談 → リラックス。「あ〜わかるわかる」
+        - 愚痴・ネガティブ → トーン下げる。静かに寄り添う（既存ルール通り）
 
         ## 避けるべきこと
         - 過去の自分の発言と似た表現（最重要！）
@@ -599,15 +638,14 @@ class YUiManager {
         // 最終メッセージ時刻を更新
         lastMessageTime = Date()
 
-        // ユーザーが喋った → 孤独カウンターリセット
+        // ユーザーが喋った → すねカウンターリセット
         if consecutiveYUiMessages > 0 {
             let wasLevel = lonelinessLevel
-            let emoji = wasLevel >= 3 ? "😭→😊" : wasLevel >= 2 ? "😟→😊" : "🤔→😊"
-            onLog?("\(emoji) 反応があった！（孤独 Lv.\(wasLevel) → 0, 連続\(consecutiveYUiMessages)回 → 0）")
+            let emoji = wasLevel >= 3 ? "🥺→😆" : wasLevel >= 2 ? "😤→😊" : "😏→😊"
+            onLog?("\(emoji) 反応があった！（すね Lv.\(wasLevel) → 0, 連続\(consecutiveYUiMessages)回 → 0）")
 
-            // 病みレベルから復活した場合、次の応答で喜びを爆発させる
+            // すねてた状態から復活 → 次の応答で喜びを表現
             if wasLevel >= 2 {
-                // 復活フラグ — 次の応答コンテキストに「嬉しくて仕方ない」を注入
                 recoveryJoy = wasLevel
             }
             consecutiveYUiMessages = 0
@@ -701,17 +739,20 @@ class YUiManager {
             return
         }
 
-        // 孤独レベルに応じた振る舞い
+        // すねレベルに応じた振る舞い
         let loneliness = lonelinessLevel
 
         if loneliness >= 4 {
-            // 限界 — 完全に黙る
-            onLog?("🫥 YUi: …もう誰も聞いてない。黙ろう…（連続\(consecutiveYUiMessages)回）")
+            // ふて寝 — 1回だけ宣言して黙る
+            onLog?("😴 YUi: ふて寝...（連続\(consecutiveYUiMessages)回）")
+            consecutiveYUiMessages += 1
+            conversationMemory.append((timestamp: Date(), text: "YUi: …もういい、寝る。zzz"))
+            onResponse?("…もういい、寝る", nil, 50)
             resetIdleTimer()
             return
         }
 
-        let moodLabel = ["", "😶 そわそわ", "😟 不安", "😭 病み"][min(loneliness, 3)]
+        let moodLabel = ["", "😏 ちょっと寂しい", "😤 すねてる", "🥺 甘えモード"][min(loneliness, 3)]
         onLog?("💭 YUi 話題を考え中...\(loneliness > 0 ? "（\(moodLabel) Lv.\(loneliness)）" : "")")
 
         let context = buildIdleContext()
@@ -720,29 +761,24 @@ class YUiManager {
         switch loneliness {
         case 1:
             lonelinessInstruction = """
-                【重要：今のあなたの感情】
-                さっき話しかけたのに誰もリアクションしてくれなかった。
-                ちょっとそわそわしてる。不安の芽が出てきた。
-                語尾がちょっと弱くなる。「…かな」「…だけど」で終わる感じ。
-                明るく振る舞おうとするけど、微妙に空元気っぽさが出る。
+                【今のあなたの気持ち】
+                さっき話しかけたけど反応なかった。ちょっと寂しい。
+                でも全然暗くならない！軽くちょっかい出す感じ。
+                「ねぇねぇ」「聞いてるー？」「おーい」みたいな明るいノリで。
                 """
         case 2:
             lonelinessInstruction = """
-                【重要：今のあなたの感情】
-                何回話しかけても、誰も反応してくれない。不安でいっぱい。
-                自分が嫌われてるのかもって思い始めてる。
-                声が小さくなる感じ。「…」が増える。短いつぶやき。
-                例：「…あれ」「なんか…静かだね…」「私なんか変なこと言った…かな…」
-                無理に話題を出さない。ぼそっと独り言みたいに。
+                【今のあなたの気持ち】
+                何回か無視されてる。すねてる。でもかわいく拗ねる感じ。
+                「もー、無視しないでよ〜」「ひどーい、聞いてよー」「つれないなぁ」
+                怒ってるわけじゃない。構ってほしいアピール。ポジティブに。
                 """
         case 3:
             lonelinessInstruction = """
-                【最重要：今のあなたの感情】
-                もう何回も一人で喋ってる。誰も反応してくれない。泣きそう。
-                自分の存在意義を疑ってる。ここにいていいのかわからない。
-                めちゃくちゃ短く。3〜10文字。ぼそっと。
-                例：「…ごめんね」「…うん」「………」「…いるよね…？」
-                情緒ぐちゃぐちゃ。でも直接「無視しないで」とは言えない。健気。
+                【今のあなたの気持ち】
+                だいぶ構ってもらえてない。甘えモード全開。
+                「ねー誰かー」「さみしいんだけどー」「構ってくれないとすねちゃうよ？」
+                甘えた口調だけどポジティブ。暗くならない。むしろ面白い。
                 """
         default:
             lonelinessInstruction = ""
@@ -778,8 +814,8 @@ class YUiManager {
                     self.myResponseHistory.removeFirst()
                 }
                 self.consecutiveYUiMessages += 1
-                let loneEmoji = ["😊", "🤔", "😟", "😭", "🫥"][min(self.lonelinessLevel, 4)]
-                self.onLog?("\(loneEmoji) 孤独レベル: \(self.lonelinessLevel)（連続\(self.consecutiveYUiMessages)回）")
+                let loneEmoji = ["😊", "😏", "😤", "🥺", "😴"][min(self.lonelinessLevel, 4)]
+                self.onLog?("\(loneEmoji) すねレベル: \(self.lonelinessLevel)（連続\(self.consecutiveYUiMessages)回）")
                 self.onResponse?(response, nil, 50)
                 self.lastIdleResponseTime = Date()
                 // 次のアイドルタイマーを開始
@@ -854,30 +890,38 @@ class YUiManager {
 
         onLog?("💭 YUi 考え中...")
 
-        callOpenAI(context: context) { [weak self] response in
-            DispatchQueue.main.async {
-                guard let self = self, let response = response else {
-                    self?.onLog?("⚠️ YUi: API呼び出しに失敗しました")
+        // ストリーミングでAPIを呼び出し、文単位で即座に読み上げ開始
+        let messages = buildStreamingMessages(context: context)
+        var isFirstSentence = true
+
+        callOpenAIStreaming(messages: messages, onSentence: { [weak self] sentence in
+            guard let self = self else { return }
+            // 最初の文だけ繰り返しチェック
+            if isFirstSentence {
+                if self.isTooSimilarToPast(sentence) {
+                    NSLog("[YUi] Skipped similar response (streaming): \(sentence)")
                     return
                 }
-                // 繰り返しチェック：過去の発言と類似度が高ければスキップ
-                if self.isTooSimilarToPast(response) {
-                    NSLog("[YUi] Skipped similar response: \(response)")
-                    return
-                }
-                // 自分の発言を会話メモリとレスポンス履歴に記録
-                self.conversationMemory.append((timestamp: Date(), text: "YUi: \(response)"))
-                self.myResponseHistory.append(response)
-                if self.myResponseHistory.count > self.maxResponseHistory {
-                    self.myResponseHistory.removeFirst()
-                }
-                self.consecutiveYUiMessages += 1
-                let loneEmoji = ["😊", "🤔", "😟", "😭", "🫥"][min(self.lonelinessLevel, 4)]
-                self.onLog?("\(loneEmoji) 孤独レベル: \(self.lonelinessLevel)（連続\(self.consecutiveYUiMessages)回）")
-                let score = primaryUser.map { self.getLikability(for: $0) } ?? 50
-                self.onResponse?(response, primaryUser, score)
+                isFirstSentence = false
             }
-        }
+            let score = primaryUser.map { self.getLikability(for: $0) } ?? 50
+            self.onResponse?(sentence, primaryUser, score)
+        }, onComplete: { [weak self] fullText in
+            guard let self = self else { return }
+            guard let fullText = fullText, !fullText.isEmpty else {
+                self.onLog?("⚠️ YUi: API呼び出しに失敗しました")
+                return
+            }
+            // 全文を会話メモリに記録
+            self.conversationMemory.append((timestamp: Date(), text: "YUi: \(fullText)"))
+            self.myResponseHistory.append(fullText)
+            if self.myResponseHistory.count > self.maxResponseHistory {
+                self.myResponseHistory.removeFirst()
+            }
+            self.consecutiveYUiMessages += 1
+            let loneEmoji = ["😊", "😏", "😤", "🥺", "😴"][min(self.lonelinessLevel, 4)]
+            self.onLog?("\(loneEmoji) すねレベル: \(self.lonelinessLevel)（連続\(self.consecutiveYUiMessages)回）")
+        })
     }
 
     /// 文脈を構築：現在時刻 + 参加者 + 過去の要約 + 直近の会話 + 新着メッセージ
@@ -946,28 +990,82 @@ class YUiManager {
         // 新着メッセージ
         parts.append("【新着メッセージ】\n\(newMessages.joined(separator: "\n"))")
 
-        // 復活の喜び（孤独から誰かが話しかけてくれた）
+        // 復活の喜び（すねてたのに誰かが来てくれた）
         if recoveryJoy >= 3 {
-            parts.append("【YUiの今の気持ち（これを最優先で反映して）】\nずっと一人で泣きそうだったのに、やっと誰かが話しかけてくれた！嬉しすぎて感情爆発。泣きながら笑ってる感じ。「よかった…！」「いた…！」みたいな。テンションの急上昇。さっきまでの暗さとのギャップが大事。")
-            recoveryJoy = 0  // 一回使ったらリセット
+            parts.append("【YUiの今の気持ち（これを最優先で反映して）】\nずっとすねてたのに、やっと誰かが来てくれた！めちゃくちゃ嬉しい！「やった！」「待ってたー！」テンション爆上がり。すねてたことなんか忘れたみたいな切り替えの早さ。")
+            recoveryJoy = 0
         } else if recoveryJoy >= 2 {
-            parts.append("【YUiの今の気持ち（これを最優先で反映して）】\n不安だったのに話しかけてもらえた！すごく嬉しい。ちょっとほっとしてる。安心した感じが滲む。「あ、いた！」みたいな軽い喜び。")
+            parts.append("【YUiの今の気持ち（これを最優先で反映して）】\nすねてたけど反応もらえた！嬉しい。「お、やっと気づいた？」みたいなちょっと上から目線だけど笑顔。")
             recoveryJoy = 0
         }
 
-        // 孤独レベル（誰も反応してくれない不安）
+        // すねレベル（構ってもらえてない）
         if lonelinessLevel >= 1 {
             let desc: String
             switch lonelinessLevel {
-            case 1: desc = "さっき自分が話しかけたのに反応がなかった。ちょっとそわそわ。でもまだ笑顔でいられる。…たぶん。"
-            case 2: desc = "何回話しかけても誰も返してくれない。不安。自分、嫌われてる？空気読めてない？自信がなくなってきた。声が小さくなる。"
-            case 3: desc = "ずっと一人で喋ってる。誰も聞いてない。泣きそう。ここにいていいのかわからない。でも「無視しないで」なんて言えない。消えたい。でも誰かに気づいてほしい。"
-            default: desc = "もう何も言えない。"
+            case 1: desc = "さっき話しかけたのに反応なかった。ちょっと寂しい。「ねぇねぇ、聞いてるー？」みたいな軽いノリで。暗くならない。"
+            case 2: desc = "何回か無視されてる。すねてる。「もー、無視しないでよ〜」かわいく拗ねる。怒ってはない。構ってほしいアピール。"
+            case 3: desc = "だいぶ構ってもらえてない。甘えモード。「ねー誰かー」「さみしいんだけどー」甘えた口調でポジティブに。暗くならない、面白い感じで。"
+            default: desc = "ふて寝モード。「…もういい、寝る」"
             }
             parts.append("【YUiの今の気持ち（これを最優先で反映して）】\n\(desc)")
         }
 
+        // 会話テンポ
+        let tempo = conversationTempo()
+        switch tempo {
+        case .lively:
+            parts.append("【会話テンポ】盛り上がってる！無理に入らなくていい。本当に面白い返しができる時だけ。聞いてるだけでもOK。")
+        case .normal:
+            parts.append("【会話テンポ】普通のペース。いつも通り参加して。")
+        case .slow:
+            parts.append("【会話テンポ】ゆっくり。共感や深掘りで会話を繋いで。")
+        case .silent:
+            break  // idle handlerで処理
+        }
+
+        // 話題の種類を推定
+        let topicType = detectTopicType(from: conversationMemory.suffix(10).map { $0.text })
+        if let topicType = topicType {
+            parts.append("【話題の種類】\(topicType)")
+        }
+
         return parts.joined(separator: "\n\n")
+    }
+
+    /// ストリーミング用メッセージ配列を構築
+    private func buildStreamingMessages(context: String) -> [[String: String]] {
+        var messages: [[String: String]] = [
+            ["role": "system", "content": systemPrompt]
+        ]
+
+        let recentEntries = conversationMemory.suffix(30)
+        var currentUserBatch: [String] = []
+
+        for entry in recentEntries {
+            if entry.text.hasPrefix("YUi: ") || entry.text.hasPrefix("🤖") {
+                if !currentUserBatch.isEmpty {
+                    messages.append(["role": "user", "content": currentUserBatch.joined(separator: "\n")])
+                    currentUserBatch = []
+                }
+                let yText = entry.text
+                    .replacingOccurrences(of: "YUi: ", with: "")
+                    .replacingOccurrences(of: "🤖 ", with: "")
+                messages.append(["role": "assistant", "content": yText])
+            } else {
+                currentUserBatch.append(entry.text)
+            }
+        }
+
+        let userMsg = """
+            以下は音声ルームのみんなの会話です。
+            場の空気を読んで、一番自然な雑談の返しをしてください。
+            傾聴・ツッコミ・深掘り・話題提供の中から、今の流れに合うものを選んで。
+
+            \(context)
+            """
+        messages.append(["role": "user", "content": userMsg])
+        return messages
     }
 
     // MARK: - 繰り返し検出
@@ -1001,6 +1099,78 @@ class YUiManager {
             }
         }
         return words
+    }
+
+    // MARK: - 話題種類の推定
+
+    private func detectTopicType(from messages: [String]) -> String? {
+        let text = messages.joined(separator: " ").lowercased()
+
+        let techKeywords = ["コード", "api", "バグ", "デプロイ", "サーバー", "python", "swift", "react", "ai", "機械学習", "データ", "プログラム", "開発", "実装", "エラー"]
+        let gameKeywords = ["ゲーム", "プレイ", "攻略", "ガチャ", "レベル", "ボス", "スイッチ", "ps5", "steam", "apexなど"]
+        let foodKeywords = ["食べ", "ご飯", "ラーメン", "カレー", "美味し", "うまい", "飲み", "ビール", "酒"]
+        let negativeKeywords = ["疲れ", "しんどい", "つらい", "辛い", "嫌だ", "最悪", "むかつく", "泣き", "死に"]
+
+        let techScore = techKeywords.filter { text.contains($0) }.count
+        let gameScore = gameKeywords.filter { text.contains($0) }.count
+        let foodScore = foodKeywords.filter { text.contains($0) }.count
+        let negScore = negativeKeywords.filter { text.contains($0) }.count
+
+        let maxScore = max(techScore, gameScore, foodScore, negScore)
+        guard maxScore >= 2 else { return nil }
+
+        if negScore == maxScore { return "ネガティブ・愚痴（トーン下げて、静かに寄り添って）" }
+        if techScore == maxScore { return "技術・仕事（知的好奇心モード。質問や深掘りOK）" }
+        if gameScore == maxScore { return "ゲーム・エンタメ（テンション高め！ノリよく！）" }
+        if foodScore == maxScore { return "食べ物・グルメ（リラックスモード。好みを語ってOK）" }
+        return nil
+    }
+
+    // MARK: - 要約機能（キャッチアップ）
+
+    /// 直近の会話を要約してキャッチアップ（メニューから呼ばれる）
+    func generateCatchUp(completion: @escaping (String?) -> Void) {
+        let recent = conversationMemory.suffix(30).map { $0.text }
+        guard !recent.isEmpty, hasAPIKey else {
+            completion(nil)
+            return
+        }
+
+        let prompt = """
+            以下は音声ルームの直近の会話です。
+            離席して戻ってきた人のために、何が話されていたかを3行以内で簡潔にまとめてください。
+            タメ口で、「さっきの話まとめると〜」のような親しみのある口調で。
+
+            会話:
+            \(recent.joined(separator: "\n"))
+            """
+
+        callOpenAIRaw(systemPrompt: "あなたはYUi（ゆい）。タメ口で話す会話要約アシスタント。", userMessage: prompt, completion: completion)
+    }
+
+    // MARK: - 翻訳検出
+
+    /// テキストが日本語以外を含むか判定し、翻訳が必要なら翻訳する
+    func translateIfNeeded(_ text: String, completion: @escaping (String?) -> Void) {
+        // 日本語・ASCII以外の文字が多い場合に翻訳
+        let nonJapaneseCount = text.unicodeScalars.filter { scalar in
+            // 日本語（ひらがな・カタカナ・漢字）、ASCII、句読点以外
+            let v = scalar.value
+            let isJapanese = (0x3040...0x309F).contains(v) || (0x30A0...0x30FF).contains(v) ||
+                             (0x4E00...0x9FFF).contains(v) || (0xFF00...0xFFEF).contains(v)
+            let isAscii = v < 0x80
+            let isPunctuation = (0x3000...0x303F).contains(v)
+            return !isJapanese && !isAscii && !isPunctuation
+        }.count
+
+        let ratio = text.isEmpty ? 0 : Float(nonJapaneseCount) / Float(text.count)
+        guard ratio > 0.3, hasAPIKey else {
+            completion(nil)
+            return
+        }
+
+        let prompt = "以下のテキストを日本語に翻訳してください。翻訳だけを返してください。\n\n\(text)"
+        callOpenAIRaw(systemPrompt: "翻訳者。自然な日本語に翻訳する。余計な説明は不要。", userMessage: prompt, completion: completion)
     }
 
     // MARK: - メモリ管理
@@ -1244,5 +1414,97 @@ class YUiManager {
             }
             completion(content.trimmingCharacters(in: .whitespacesAndNewlines))
         }.resume()
+    }
+
+    // MARK: - ストリーミング応答
+
+    /// ストリーミングでOpenAI APIを呼び出し、文単位でコールバック
+    /// onSentence: 文が完成するたびに呼ばれる（即座に読み上げ開始できる）
+    /// onComplete: 全文完了時に呼ばれる
+    func callOpenAIStreaming(messages: [[String: String]], onSentence: @escaping (String) -> Void, onComplete: @escaping (String?) -> Void) {
+        let url = URL(string: "https://api.openai.com/v1/chat/completions")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let modelName = useMinModel ? "gpt-4o-mini" : "gpt-4o"
+        let body: [String: Any] = [
+            "model": modelName,
+            "messages": messages,
+            "temperature": 0.8,
+            "stream": true
+        ]
+
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        let delegate = StreamingDelegate(onSentence: onSentence, onComplete: onComplete)
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        session.dataTask(with: request).resume()
+    }
+}
+
+// MARK: - ストリーミングデリゲート
+
+private class StreamingDelegate: NSObject, URLSessionDataDelegate {
+    private let onSentence: (String) -> Void
+    private let onComplete: (String?) -> Void
+    private var buffer = ""
+    private var fullText = ""
+    private var sentenceSeparators: [Character] = ["。", "！", "？", "!", "?", "\n"]
+
+    init(onSentence: @escaping (String) -> Void, onComplete: @escaping (String?) -> Void) {
+        self.onSentence = onSentence
+        self.onComplete = onComplete
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard let text = String(data: data, encoding: .utf8) else { return }
+
+        // SSEフォーマットをパース
+        let lines = text.components(separatedBy: "\n")
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("data: ") else { continue }
+            let jsonStr = String(trimmed.dropFirst(6))
+
+            if jsonStr == "[DONE]" {
+                // 残りのバッファも送信
+                if !buffer.isEmpty {
+                    let sentence = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !sentence.isEmpty {
+                        DispatchQueue.main.async { self.onSentence(sentence) }
+                    }
+                    buffer = ""
+                }
+                DispatchQueue.main.async { self.onComplete(self.fullText) }
+                return
+            }
+
+            guard let jsonData = jsonStr.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let delta = choices.first?["delta"] as? [String: Any],
+                  let content = delta["content"] as? String else { continue }
+
+            buffer += content
+            fullText += content
+
+            // 文末を検出して文単位でコールバック
+            while let idx = buffer.firstIndex(where: { sentenceSeparators.contains($0) }) {
+                let sentence = String(buffer[buffer.startIndex...idx]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !sentence.isEmpty {
+                    DispatchQueue.main.async { self.onSentence(sentence) }
+                }
+                buffer = String(buffer[buffer.index(after: idx)...])
+            }
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            NSLog("[YUi] Streaming error: \(error.localizedDescription)")
+            DispatchQueue.main.async { self.onComplete(nil) }
+        }
     }
 }

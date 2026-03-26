@@ -198,6 +198,8 @@ class RoomTranscriptionManager {
         if let features = diarizer.extractFeatures(from: samples),
            let result = diarizer.identify(features: features) {
             lastIdentifiedSpeaker = result.speaker
+            // 適応学習: 高確信度の識別結果でプロファイルを微更新
+            diarizer.adaptiveUpdate(speaker: result.speaker, features: features)
             return result.speaker
         }
         lastIdentifiedSpeaker = "不明"

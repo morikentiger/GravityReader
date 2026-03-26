@@ -29,6 +29,8 @@ class StatusBarController {
     var onModelToggle: (() -> Bool)?  // returns new isMinModel value
     var onStartEnrollment: ((String) -> Void)?  // 指定ユーザー1人の声紋登録
     var onClearAllVoiceProfiles: (() -> Void)?  // 全声紋クリア
+    var onShowPreferences: (() -> Void)?
+    var onCatchUp: (() -> Void)?
 
     private var voiceSubmenu: NSMenu!
     private var voiceMenuItem: NSMenuItem!
@@ -153,6 +155,16 @@ class StatusBarController {
 
         menu.addItem(.separator())
 
+        let catchUpItem = NSMenuItem(title: "📝 会話キャッチアップ", action: #selector(requestCatchUp), keyEquivalent: "")
+        catchUpItem.target = self
+        menu.addItem(catchUpItem)
+
+        let prefsItem = NSMenuItem(title: "⚙ 設定...", action: #selector(showPreferences), keyEquivalent: ",")
+        prefsItem.target = self
+        menu.addItem(prefsItem)
+
+        menu.addItem(.separator())
+
         let quitItem = NSMenuItem(title: "終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quitItem)
 
@@ -248,6 +260,14 @@ class StatusBarController {
         apiKeyWindow?.close()
         apiKeyWindow = nil
         apiKeyInput = nil
+    }
+
+    @objc private func showPreferences() {
+        onShowPreferences?()
+    }
+
+    @objc private func requestCatchUp() {
+        onCatchUp?()
     }
 
     @objc private func toggleReading() {

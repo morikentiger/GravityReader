@@ -203,6 +203,50 @@ class VoiceDiarizer {
         }
     }
 
+    // MARK: - 適応学習（高確信度で自動更新）
+
+    /// 識別結果が高確信度の場合、プロファイルを自動で微更新する
+    /// 環境変化（マイク位置、部屋の反響等）に徐々に適応する
+    func adaptiveUpdate(speaker: String, features: [Float]) {
+        guard features.count == featureDimension else { return }
+        guard var profile = profiles[speaker] else { return }
+        guard profile.mode == mode else { return }
+
+        // 確信度チェック：ニューラルなら高コサイン類似度、MFCCなら近距離
+        let shouldUpdate: Bool
+        switch mode {
+        case .neural:
+            let sim = cosineSimilarity(features, profile.features)
+            shouldUpdate = sim >= 0.55  // 高確信度のみ（登録閾値0.25よりかなり厳しい）
+        case .mfcc:
+            let dist = euclideanDistance(features, profile.features)
+            shouldUpdate = dist <= maxDistance * 0.5  // 距離が閾値の半分以下
+        }
+
+        guard shouldUpdate else { return }
+
+        // ゆっくり更新（alpha小さめ → 急激な変化を避ける）
+        let alpha: Float = 0.05  // 5%ずつ更新
+        var updated = profile.features
+        for i in 0..<featureDimension {
+            updated[i] = updated[i] * (1 - alpha) + features[i] * alpha
+        }
+
+        if mode == .neural {
+            updated = l2Normalize(updated)
+        }
+
+        profile.features = updated
+        profile.sampleCount += 1
+        profiles[speaker] = profile
+
+        // 50回ごとにログ & 保存（毎回はやらない）
+        if profile.sampleCount % 50 == 0 {
+            onLog?("🔄 声紋適応更新: \(speaker)（累計\(profile.sampleCount)サンプル）")
+            saveProfiles()
+        }
+    }
+
     // --- ニューラルモード: コサイン類似度 ---
     private func identifyNeural(features: [Float]) -> (speaker: String, confidence: Float)? {
         var results: [(name: String, similarity: Float)] = []

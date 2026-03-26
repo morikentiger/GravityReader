@@ -1,27 +1,181 @@
 import AppKit
 
-class LogWindowController: NSWindowController {
+// MARK: - Log Entry Model
+private struct LogEntry {
+    let id: UUID = UUID()
+    let timestamp: Date
+    let text: String
+    let isYUi: Bool
+    let speaker: String?         // nil = system
+    let attributedString: NSAttributedString
+
+    var category: LogCategory {
+        if isYUi { return .yui }
+        if let s = speaker, !s.isEmpty, s != "_default" { return .user }
+        // Heuristic: if text starts with speaker emoji, treat as user
+        if text.hasPrefix("\u{1F5E3}") { return .user }
+        return .system
+    }
+}
+
+private enum LogCategory: String {
+    case all    = "全て"
+    case yui    = "YUi"
+    case user   = "ユーザー"
+    case system = "システム"
+}
+
+class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelegate {
     private var textView: NSTextView!
+    private var scrollView: NSScrollView!
     private var entryCount = 0
+
+    // --- Search / Filter ---
+    private var searchField: NSTextField!
+    private var filterPopup: NSPopUpButton!
+    private var bookmarkToggleButton: NSButton!
+    private var searchBarContainer: NSView!
+
+    // --- Statistics panel ---
+    private var statsContainer: NSView!
+    private var statsLabel: NSTextField!
+    private var statsToggleButton: NSButton!
+    private var statsVisible = false
+
+    // --- Data model ---
+    private var allEntries: [LogEntry] = []
+    private var filteredEntryIDs: Set<UUID> = []
+    private var isFiltering = false
+    private var showBookmarksOnly = false
+
+    // --- Bookmarks ---
+    private var bookmarkedIDs: Set<String> = []   // stored as UUID strings
+    private let bookmarksDefaultsKey = "GravityReaderLogBookmarks"
+
+    // --- Statistics ---
+    private var speakerCounts: [String: Int] = [:]
+    private var sessionStart = Date()
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 300, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 300, height: 700),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.title = "GravityReader ログ"
-        window.minSize = NSSize(width: 240, height: 300)
+        window.minSize = NSSize(width: 240, height: 400)
         window.level = .floating
         window.isReleasedWhenClosed = false
         window.backgroundColor = NSColor(white: 0.12, alpha: 1)
 
         self.init(window: window)
 
-        // NSTextView.scrollableTextView() で正しく配線されたScrollView+TextViewを生成
-        let scrollView = NSTextView.scrollableTextView()
-        textView = scrollView.documentView as? NSTextView
+        loadBookmarks()
+        buildUI(in: window)
+
+        if let screen = NSScreen.main {
+            let sw = screen.visibleFrame
+            window.setFrame(NSRect(
+                x: sw.maxX - 308, y: sw.midY - 350,
+                width: 300, height: 700
+            ), display: false)
+        }
+    }
+
+    // MARK: - UI Construction
+
+    private func buildUI(in window: NSWindow) {
+        guard let contentView = window.contentView else { return }
+
+        // ── Search bar container (top) ──
+        searchBarContainer = NSView()
+        searchBarContainer.translatesAutoresizingMaskIntoConstraints = false
+        searchBarContainer.wantsLayer = true
+        searchBarContainer.layer?.backgroundColor = NSColor(white: 0.15, alpha: 1).cgColor
+        contentView.addSubview(searchBarContainer)
+
+        searchField = NSTextField()
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchField.placeholderString = "検索..."
+        searchField.font = .systemFont(ofSize: 12)
+        searchField.isBezeled = true
+        searchField.bezelStyle = .roundedBezel
+        searchField.delegate = self
+        searchField.target = self
+        searchField.action = #selector(searchChanged)
+        searchField.cell?.sendsActionOnEndEditing = false
+        // Dark appearance styling
+        searchField.backgroundColor = NSColor(white: 0.2, alpha: 1)
+        searchField.textColor = NSColor(white: 0.9, alpha: 1)
+        searchBarContainer.addSubview(searchField)
+
+        filterPopup = NSPopUpButton()
+        filterPopup.translatesAutoresizingMaskIntoConstraints = false
+        filterPopup.font = .systemFont(ofSize: 11)
+        filterPopup.addItems(withTitles: ["全て", "YUi", "ユーザー", "システム"])
+        filterPopup.target = self
+        filterPopup.action = #selector(filterChanged)
+        searchBarContainer.addSubview(filterPopup)
+
+        bookmarkToggleButton = NSButton(title: "\u{1F516}", target: self, action: #selector(toggleBookmarkView))
+        bookmarkToggleButton.translatesAutoresizingMaskIntoConstraints = false
+        bookmarkToggleButton.isBordered = false
+        bookmarkToggleButton.font = .systemFont(ofSize: 14)
+        bookmarkToggleButton.toolTip = "ブックマーク一覧"
+        searchBarContainer.addSubview(bookmarkToggleButton)
+
+        NSLayoutConstraint.activate([
+            searchBarContainer.topAnchor.constraint(equalTo: contentView.topAnchor),
+            searchBarContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            searchBarContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            searchBarContainer.heightAnchor.constraint(equalToConstant: 32),
+
+            searchField.leadingAnchor.constraint(equalTo: searchBarContainer.leadingAnchor, constant: 4),
+            searchField.centerYAnchor.constraint(equalTo: searchBarContainer.centerYAnchor),
+            searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 80),
+
+            filterPopup.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: 4),
+            filterPopup.centerYAnchor.constraint(equalTo: searchBarContainer.centerYAnchor),
+            filterPopup.widthAnchor.constraint(equalToConstant: 80),
+
+            bookmarkToggleButton.leadingAnchor.constraint(equalTo: filterPopup.trailingAnchor, constant: 2),
+            bookmarkToggleButton.trailingAnchor.constraint(lessThanOrEqualTo: searchBarContainer.trailingAnchor, constant: -4),
+            bookmarkToggleButton.centerYAnchor.constraint(equalTo: searchBarContainer.centerYAnchor),
+
+            searchField.trailingAnchor.constraint(equalTo: filterPopup.leadingAnchor, constant: -4),
+        ])
+
+        // ── Stats container (bottom, collapsible) ──
+        statsContainer = NSView()
+        statsContainer.translatesAutoresizingMaskIntoConstraints = false
+        statsContainer.wantsLayer = true
+        statsContainer.layer?.backgroundColor = NSColor(white: 0.15, alpha: 1).cgColor
+        statsContainer.isHidden = true
+        contentView.addSubview(statsContainer)
+
+        statsLabel = NSTextField(labelWithString: "")
+        statsLabel.translatesAutoresizingMaskIntoConstraints = false
+        statsLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        statsLabel.textColor = NSColor(white: 0.75, alpha: 1)
+        statsLabel.maximumNumberOfLines = 0
+        statsLabel.lineBreakMode = .byWordWrapping
+        statsLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        statsContainer.addSubview(statsLabel)
+
+        // Stats toggle button (always visible at bottom-left)
+        statsToggleButton = NSButton(title: "\u{1F4CA}", target: self, action: #selector(toggleStats))
+        statsToggleButton.translatesAutoresizingMaskIntoConstraints = false
+        statsToggleButton.isBordered = false
+        statsToggleButton.font = .systemFont(ofSize: 14)
+        statsToggleButton.toolTip = "統計パネル表示/非表示"
+        contentView.addSubview(statsToggleButton)
+
+        // ── Scroll view + text view (middle) ──
+        let sv = NSTextView.scrollableTextView()
+        scrollView = sv
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        textView = sv.documentView as? NSTextView
         textView.isEditable = false
         textView.isSelectable = true
         textView.backgroundColor = NSColor(white: 0.12, alpha: 1)
@@ -29,28 +183,95 @@ class LogWindowController: NSWindowController {
         textView.font = .systemFont(ofSize: 13)
         textView.textContainerInset = NSSize(width: 6, height: 6)
 
-        // contentViewにぴったり配置
-        scrollView.frame = window.contentView!.bounds
-        scrollView.autoresizingMask = [.width, .height]
-        window.contentView!.addSubview(scrollView)
+        // Context menu for bookmarks
+        let menu = NSMenu()
+        menu.delegate = self
+        textView.menu = menu
 
-        if let screen = NSScreen.main {
-            let sw = screen.visibleFrame
-            window.setFrame(NSRect(
-                x: sw.maxX - 308, y: sw.midY - 300,
-                width: 300, height: 600
-            ), display: false)
+        contentView.addSubview(scrollView)
+
+        // Stats container constraints
+        let statsHeight = statsContainer.heightAnchor.constraint(equalToConstant: 80)
+        statsHeight.priority = .defaultHigh
+
+        NSLayoutConstraint.activate([
+            // Stats toggle button at very bottom
+            statsToggleButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -2),
+            statsToggleButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 4),
+            statsToggleButton.heightAnchor.constraint(equalToConstant: 20),
+
+            // Stats container above toggle button
+            statsContainer.bottomAnchor.constraint(equalTo: statsToggleButton.topAnchor),
+            statsContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            statsContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            statsHeight,
+
+            statsLabel.topAnchor.constraint(equalTo: statsContainer.topAnchor, constant: 4),
+            statsLabel.leadingAnchor.constraint(equalTo: statsContainer.leadingAnchor, constant: 8),
+            statsLabel.trailingAnchor.constraint(equalTo: statsContainer.trailingAnchor, constant: -8),
+            statsLabel.bottomAnchor.constraint(lessThanOrEqualTo: statsContainer.bottomAnchor, constant: -4),
+
+            // Scroll view fills space between search bar and stats
+            scrollView.topAnchor.constraint(equalTo: searchBarContainer.bottomAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: statsContainer.isHidden ? statsToggleButton.topAnchor : statsContainer.topAnchor),
+        ])
+
+        // We'll manage the bottom constraint of scrollView dynamically
+        updateScrollViewBottomConstraint()
+
+        // Cmd+F key handling via monitor
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self else { return event }
+            if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "f" {
+                if self.window?.isKeyWindow == true {
+                    self.window?.makeFirstResponder(self.searchField)
+                    return nil
+                }
+            }
+            return event
         }
     }
+
+    private var scrollViewBottomConstraint: NSLayoutConstraint?
+
+    private func updateScrollViewBottomConstraint() {
+        guard let contentView = window?.contentView else { return }
+        scrollViewBottomConstraint?.isActive = false
+
+        if statsVisible {
+            scrollViewBottomConstraint = scrollView.bottomAnchor.constraint(equalTo: statsContainer.topAnchor)
+        } else {
+            scrollViewBottomConstraint = scrollView.bottomAnchor.constraint(equalTo: statsToggleButton.topAnchor)
+        }
+        scrollViewBottomConstraint?.isActive = true
+        contentView.layoutSubtreeIfNeeded()
+    }
+
+    // MARK: - Bookmark Persistence
+
+    private func loadBookmarks() {
+        if let saved = UserDefaults.standard.array(forKey: bookmarksDefaultsKey) as? [String] {
+            bookmarkedIDs = Set(saved)
+        }
+    }
+
+    private func saveBookmarks() {
+        UserDefaults.standard.set(Array(bookmarkedIDs), forKey: bookmarksDefaultsKey)
+    }
+
+    // MARK: - Add / Update Entries
 
     func addEntry(_ text: String, isYUi: Bool = false) {
         guard let storage = textView?.textStorage else { return }
 
         entryCount += 1
 
+        let now = Date()
         let fmt = DateFormatter()
         fmt.dateFormat = "HH:mm:ss"
-        let time = fmt.string(from: Date())
+        let time = fmt.string(from: now)
 
         let textColor = isYUi
             ? NSColor(red: 0.5, green: 0.9, blue: 0.8, alpha: 1)
@@ -72,9 +293,38 @@ class LogWindowController: NSWindowController {
             ]
         ))
 
-        storage.append(line)
-        textView.scrollToEndOfDocument(nil)
+        // Determine speaker name for stats
+        let speakerName: String? = extractSpeaker(from: text, isYUi: isYUi)
+
+        let entry = LogEntry(timestamp: now, text: text, isYUi: isYUi, speaker: speakerName, attributedString: line)
+        allEntries.append(entry)
+
+        // Update stats
+        let displaySpeaker = speakerName ?? (isYUi ? "YUi" : "システム")
+        speakerCounts[displaySpeaker, default: 0] += 1
+        updateStatsLabel()
+
+        if shouldShow(entry: entry) {
+            let displayLine = buildDisplayLine(for: entry)
+            storage.append(displayLine)
+            textView.scrollToEndOfDocument(nil)
+        }
+
         window?.title = "GravityReader ログ (\(entryCount))"
+    }
+
+    private func extractSpeaker(from text: String, isYUi: Bool) -> String? {
+        if isYUi { return "YUi" }
+        // Try to extract "speaker: text" pattern after emoji
+        // Pattern: 🗣 SpeakerName: ...
+        if text.hasPrefix("\u{1F5E3} ") || text.hasPrefix("\u{1F5E3}") {
+            let stripped = text.drop(while: { $0 == "\u{1F5E3}" || $0 == " " })
+            if let colonIdx = stripped.firstIndex(of: ":") {
+                let name = String(stripped[stripped.startIndex..<colonIdx]).trimmingCharacters(in: .whitespaces)
+                if !name.isEmpty { return name }
+            }
+        }
+        return nil
     }
 
     /// 話者別パーシャルライン（キー=話者名, 値=NSRange）
@@ -98,7 +348,7 @@ class LogWindowController: NSWindowController {
             ]
         ))
         line.append(NSAttributedString(
-            string: "🗣 " + text + "\n",
+            string: "\u{1F5E3} " + text + "\n",
             attributes: [
                 .foregroundColor: NSColor(red: 1.0, green: 0.85, blue: 0.4, alpha: 0.7),
                 .font: NSFont.systemFont(ofSize: 13)
@@ -165,7 +415,7 @@ class LogWindowController: NSWindowController {
                 ]
             ))
             line.append(NSAttributedString(
-                string: "🗣 \(speaker): \(text)\n",
+                string: "\u{1F5E3} \(speaker): \(text)\n",
                 attributes: [
                     .foregroundColor: NSColor(white: 0.92, alpha: 1),
                     .font: NSFont.systemFont(ofSize: 13)
@@ -187,10 +437,19 @@ class LogWindowController: NSWindowController {
             partialLineRanges.removeValue(forKey: speaker)
 
             entryCount += 1
+
+            // Also record in allEntries for search/filter/stats
+            let now = Date()
+            let entryText = "\u{1F5E3} \(speaker): \(text)"
+            let entry = LogEntry(timestamp: now, text: entryText, isYUi: false, speaker: speaker, attributedString: line)
+            allEntries.append(entry)
+            speakerCounts[speaker, default: 0] += 1
+            updateStatsLabel()
+
             window?.title = "GravityReader ログ (\(entryCount))"
         } else {
             // パーシャル行がない場合は通常の確定行を追加
-            addEntry("🗣 \(speaker): \(text)")
+            addEntry("\u{1F5E3} \(speaker): \(text)")
         }
     }
 
@@ -209,18 +468,225 @@ class LogWindowController: NSWindowController {
 
     func setStatus(running: Bool) {
         // ウィンドウタイトルに状態を反映
-        let prefix = running ? "🔊" : "⏸"
+        let prefix = running ? "\u{1F50A}" : "\u{23F8}"
         window?.title = "\(prefix) GravityReader ログ (\(entryCount))"
     }
 
     @objc private func clearLog() {
         textView?.textStorage?.setAttributedString(NSAttributedString(string: ""))
         entryCount = 0
+        allEntries.removeAll()
+        speakerCounts.removeAll()
+        sessionStart = Date()
+        updateStatsLabel()
         window?.title = "GravityReader ログ"
     }
 
     func show() {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - Search / Filter
+
+    @objc private func searchChanged() {
+        applyFilter()
+    }
+
+    @objc private func filterChanged() {
+        applyFilter()
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        // Real-time search as user types
+        applyFilter()
+    }
+
+    private func applyFilter() {
+        guard let storage = textView?.textStorage else { return }
+
+        let query = searchField.stringValue.lowercased()
+        let selectedFilter = filterPopup.titleOfSelectedItem ?? "全て"
+        let category: LogCategory? = {
+            switch selectedFilter {
+            case "YUi": return .yui
+            case "ユーザー": return .user
+            case "システム": return .system
+            default: return nil
+            }
+        }()
+
+        let hasFilter = !query.isEmpty || category != nil || showBookmarksOnly
+        isFiltering = hasFilter
+
+        // Rebuild text view from allEntries
+        let result = NSMutableAttributedString()
+        for entry in allEntries {
+            if shouldShow(entry: entry, query: query, category: category) {
+                result.append(buildDisplayLine(for: entry))
+            }
+        }
+
+        storage.setAttributedString(result)
+
+        // Partial entries are appended back if not filtering
+        if !hasFilter {
+            // Re-append any active partial lines
+            // (They operate on raw storage, so after a refilter they are lost.
+            //  We clear them to keep things consistent.)
+            partialLineRanges.removeAll()
+        }
+
+        textView.scrollToEndOfDocument(nil)
+    }
+
+    private func shouldShow(entry: LogEntry, query: String? = nil, category: LogCategory? = nil) -> Bool {
+        let q = query ?? searchField.stringValue.lowercased()
+        let cat: LogCategory? = category ?? {
+            switch filterPopup.titleOfSelectedItem ?? "全て" {
+            case "YUi": return .yui
+            case "ユーザー": return .user
+            case "システム": return .system
+            default: return nil
+            }
+        }()
+        let hasFilter = !q.isEmpty || cat != nil || showBookmarksOnly
+
+        if !hasFilter { return true }
+
+        // Bookmark filter
+        if showBookmarksOnly && !bookmarkedIDs.contains(entry.id.uuidString) {
+            return false
+        }
+
+        // Category filter
+        if let c = cat, entry.category != c {
+            return false
+        }
+
+        // Text search
+        if !q.isEmpty && !entry.text.lowercased().contains(q) {
+            return false
+        }
+
+        return true
+    }
+
+    /// Build a display attributed string for an entry, with bookmark marker if needed
+    private func buildDisplayLine(for entry: LogEntry) -> NSAttributedString {
+        let isBookmarked = bookmarkedIDs.contains(entry.id.uuidString)
+        if isBookmarked {
+            let result = NSMutableAttributedString()
+            // Add a colored left-border marker
+            result.append(NSAttributedString(
+                string: "\u{2503} ",
+                attributes: [
+                    .foregroundColor: NSColor(red: 0.95, green: 0.7, blue: 0.2, alpha: 1),
+                    .font: NSFont.systemFont(ofSize: 13)
+                ]
+            ))
+            result.append(entry.attributedString)
+            return result
+        }
+        return entry.attributedString
+    }
+
+    // MARK: - Bookmark Toggle (context menu)
+
+    @objc private func toggleBookmarkView() {
+        showBookmarksOnly.toggle()
+        if showBookmarksOnly {
+            bookmarkToggleButton.title = "\u{1F516}\u{2713}"
+            bookmarkToggleButton.toolTip = "全て表示に戻す"
+        } else {
+            bookmarkToggleButton.title = "\u{1F516}"
+            bookmarkToggleButton.toolTip = "ブックマーク一覧"
+        }
+        applyFilter()
+    }
+
+    // MARK: - Context Menu (NSMenuDelegate)
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+
+        // Standard items
+        menu.addItem(NSMenuItem(title: "コピー", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        menu.addItem(NSMenuItem.separator())
+
+        // Find which entry the click is on
+        if let windowPoint = window?.convertPoint(fromScreen: NSEvent.mouseLocation) {
+            let viewPoint = textView.convert(windowPoint, from: nil)
+            let charIndex = textView.characterIndexForInsertion(at: viewPoint)
+            if let entry = entryAtCharacterIndex(charIndex) {
+                let isBookmarked = bookmarkedIDs.contains(entry.id.uuidString)
+                let title = isBookmarked ? "\u{1F516} ブックマーク解除" : "\u{1F516} ブックマーク"
+                let item = NSMenuItem(title: title, action: #selector(toggleBookmarkForClickedEntry(_:)), keyEquivalent: "")
+                item.representedObject = entry.id.uuidString
+                item.target = self
+                menu.addItem(item)
+            }
+        }
+
+        menu.addItem(NSMenuItem.separator())
+        let clearItem = NSMenuItem(title: "ログをクリア", action: #selector(clearLog), keyEquivalent: "")
+        clearItem.target = self
+        menu.addItem(clearItem)
+    }
+
+    /// Find the LogEntry corresponding to a character index in the current display
+    private func entryAtCharacterIndex(_ charIndex: Int) -> LogEntry? {
+        guard charIndex >= 0 else { return nil }
+        var offset = 0
+        for entry in allEntries {
+            guard shouldShow(entry: entry) else { continue }
+            let line = buildDisplayLine(for: entry)
+            let len = line.length
+            if charIndex >= offset && charIndex < offset + len {
+                return entry
+            }
+            offset += len
+        }
+        return nil
+    }
+
+    @objc private func toggleBookmarkForClickedEntry(_ sender: NSMenuItem) {
+        guard let idString = sender.representedObject as? String else { return }
+        if bookmarkedIDs.contains(idString) {
+            bookmarkedIDs.remove(idString)
+        } else {
+            bookmarkedIDs.insert(idString)
+        }
+        saveBookmarks()
+        applyFilter()
+    }
+
+    // MARK: - Statistics Panel
+
+    @objc private func toggleStats() {
+        statsVisible.toggle()
+        statsContainer.isHidden = !statsVisible
+        updateScrollViewBottomConstraint()
+        if statsVisible {
+            updateStatsLabel()
+        }
+    }
+
+    private func updateStatsLabel() {
+        guard statsVisible || true else { return }  // always compute, show when visible
+
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm:ss"
+        let startTime = fmt.string(from: sessionStart)
+
+        var lines = "セッション開始: \(startTime) | 総発言数: \(entryCount)\n"
+
+        let sortedSpeakers = speakerCounts.sorted { $0.value > $1.value }
+        let speakerParts = sortedSpeakers.map { "\($0.key): \($0.value)" }
+        if !speakerParts.isEmpty {
+            lines += speakerParts.joined(separator: "  ")
+        }
+
+        statsLabel.stringValue = lines
     }
 }
