@@ -65,20 +65,27 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         if let savedDict = UserDefaults.standard.dictionary(forKey: readingDictKey) as? [String: String] {
             readingDictionary = savedDict
         }
-        // デフォルト辞書（初回のみ）
-        if readingDictionary.isEmpty {
-            let defaults: [String: String] = [
-                "辛い": "つらい",
-                "C3PO": "シースリーピーオー",
-                "C-3PO": "シースリーピーオー",
-                "R2D2": "アールツーディーツー",
-                "R2-D2": "アールツーディーツー",
-                "w": "わら",
-                "www": "わらわら",
-            ]
-            readingDictionary = defaults
-            saveReadingDictionary()
+        // デフォルト辞書（未登録のエントリのみ自動追加）
+        let defaults: [String: String] = [
+            "辛い": "つらい",
+            "どんな風": "どんなふう",
+            "こんな風": "こんなふう",
+            "そんな風": "そんなふう",
+            "あんな風": "あんなふう",
+            "同じ風": "おなじふう",
+            "C3PO": "シースリーピーオー",
+            "C-3PO": "シースリーピーオー",
+            "R2D2": "アールツーディーツー",
+            "R2-D2": "アールツーディーツー",
+            "w": "わら",
+            "www": "わらわら",
+        ]
+        var added = false
+        for (word, reading) in defaults where readingDictionary[word] == nil {
+            readingDictionary[word] = reading
+            added = true
         }
+        if added { saveReadingDictionary() }
     }
 
     // MARK: - Public

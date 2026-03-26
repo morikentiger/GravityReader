@@ -164,11 +164,13 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         statsContainer.addSubview(statsLabel)
 
         // Stats toggle button (always visible at bottom-left)
-        statsToggleButton = NSButton(title: "\u{1F4CA}", target: self, action: #selector(toggleStats))
+        statsToggleButton = NSButton(title: "📊 統計", target: self, action: #selector(toggleStats))
         statsToggleButton.translatesAutoresizingMaskIntoConstraints = false
-        statsToggleButton.isBordered = false
-        statsToggleButton.font = .systemFont(ofSize: 14)
+        statsToggleButton.bezelStyle = .recessed
+        statsToggleButton.isBordered = true
+        statsToggleButton.font = .systemFont(ofSize: 11)
         statsToggleButton.toolTip = "統計パネル表示/非表示"
+        statsToggleButton.setButtonType(.pushOnPushOff)
         contentView.addSubview(statsToggleButton)
 
         // ── Scroll view + text view (middle) ──
@@ -196,9 +198,10 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
 
         NSLayoutConstraint.activate([
             // Stats toggle button at very bottom
-            statsToggleButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -2),
-            statsToggleButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 4),
-            statsToggleButton.heightAnchor.constraint(equalToConstant: 20),
+            statsToggleButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+            statsToggleButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
+            statsToggleButton.heightAnchor.constraint(equalToConstant: 24),
+            statsToggleButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 60),
 
             // Stats container above toggle button
             statsContainer.bottomAnchor.constraint(equalTo: statsToggleButton.topAnchor),
@@ -215,10 +218,9 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
             scrollView.topAnchor.constraint(equalTo: searchBarContainer.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: statsContainer.isHidden ? statsToggleButton.topAnchor : statsContainer.topAnchor),
         ])
 
-        // We'll manage the bottom constraint of scrollView dynamically
+        // scrollView の下端は動的に管理（統計パネル表示/非表示で切り替え）
         updateScrollViewBottomConstraint()
 
         // Cmd+F key handling via monitor

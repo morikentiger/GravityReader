@@ -159,8 +159,19 @@ class GravityCaptureManager {
     private func registerUser(_ fullName: String) {
         if !detectedUsers.contains(fullName) {
             detectedUsers.append(fullName)
-            onUsersUpdated?(detectedUsers)
+            onUsersUpdated?(mergedUserList())
         }
+    }
+
+    /// detectedUsers + currentParticipants をマージ（重複排除）
+    private func mergedUserList() -> [String] {
+        var result = detectedUsers
+        for p in currentParticipants {
+            if !result.contains(where: { $0 == p || $0.contains(p) || p.contains($0) }) {
+                result.append(p)
+            }
+        }
+        return result
     }
 
     /// 部分一致でフルネームを解決（「ナポリタン」→「ナポリタン🍝」等）
@@ -350,7 +361,9 @@ class GravityCaptureManager {
             let list = currentParticipants.joined(separator: "、")
             logWindow?.addEntry("👥 参加者(\(currentParticipants.count)人): \(list)")
             yuiManager?.updateParticipants(currentParticipants)
-            onUsersUpdated?(detectedUsers)
+            // 声紋登録メニューには currentParticipants も含める（チャットしてなくても表示）
+            let allUsers = mergedUserList()
+            onUsersUpdated?(allUsers)
         }
     }
 

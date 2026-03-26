@@ -48,7 +48,7 @@ class RoomTranscriptionManager {
     /// 音声バッファを一時蓄積（声紋抽出用）
     private var recentAudioSamples: [Float] = []
     private let maxAudioSamplesForProfile: Int = 44100 * 3  // 3秒分（登録用）
-    private let identifyAudioWindow: Int = 44100 * 1        // 1秒分（識別用 — 短い方が混ざりにくい）
+    private let identifyAudioWindow: Int = 44100 * 2        // 2秒分（埋め込み品質と混合のバランス）
     private var audioSamplesLock = NSLock()
 
     /// 識別スロットル（重い処理を毎回やらない）
@@ -179,6 +179,7 @@ class RoomTranscriptionManager {
 
     /// 直近の音声サンプルから話者を推定（スロットル付き）
     private var lastIdentifiedSpeaker: String = "不明"
+    private var unknownStreakCount: Int = 0
 
     private func identifySpeaker() -> String {
         // スロットル: 0.5秒に1回だけ実行
@@ -196,10 +197,12 @@ class RoomTranscriptionManager {
         guard samples.count >= 22050 else { return "不明" }  // 最低0.5秒
 
         if let features = diarizer.extractFeatures(from: samples),
-           let result = diarizer.identify(features: features) {
+           let result = diarizer.identifyWithConfidence(features: features) {
             lastIdentifiedSpeaker = result.speaker
-            // 適応学習: 高確信度の識別結果でプロファイルを微更新
-            diarizer.adaptiveUpdate(speaker: result.speaker, features: features)
+            // 適応学習: 厳格マージン確定時のみ実行（推定判定でプロファイルを汚染しない）
+            if result.level == .strict {
+                diarizer.adaptiveUpdate(speaker: result.speaker, features: features)
+            }
             return result.speaker
         }
         lastIdentifiedSpeaker = "不明"
@@ -365,6 +368,20 @@ class RoomTranscriptionManager {
             currentSegmentSpeaker = identified
         } else if currentSegmentSpeaker == "不明" && identified != "不明" {
             currentSegmentSpeaker = identified
+        } else if identified == "不明" && currentSegmentSpeaker != "不明" {
+            // マージン不足で識別失敗 → 前の話者が居座るのを防ぐ
+            // 直近で複数回連続「不明」なら話者を切り替える
+            unknownStreakCount += 1
+            if unknownStreakCount >= 3 {
+                if !currentSegmentSpeaker.isEmpty && currentSegmentSpeaker != "不明" {
+                    confirmCurrentSegment()
+                }
+                currentSegmentSpeaker = "不明"
+                unknownStreakCount = 0
+            }
+        }
+        if identified != "不明" {
+            unknownStreakCount = 0
         }
 
         // デルタを現在の話者に追加

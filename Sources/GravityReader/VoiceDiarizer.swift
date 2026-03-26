@@ -39,9 +39,19 @@ class VoiceDiarizer {
 
     // --- ニューラルモード用パラメータ ---
     /// コサイン類似度の最低閾値（これ以下は「不明」）
-    var minSimilarity: Float = 0.25
-    /// 1位と2位のコサイン類似度差の最低マージン
-    var similarityMargin: Float = 0.05
+    var minSimilarity: Float = 0.45
+    /// 1位と2位のコサイン類似度差の最低マージン（厳格判定用）
+    var similarityMargin: Float = 0.08
+    /// 緩いマージン閾値（多数決補助判定用）— この以上なら候補に入れる
+    var softMargin: Float = 0.02
+
+    // --- 時間的多数決（temporal voting）---
+    /// 直近N回の識別候補を保持
+    private var recentVotes: [(speaker: String, score: Float)] = []
+    /// 多数決に使うウィンドウサイズ
+    private let votingWindowSize = 5
+    /// 多数決で採用するのに必要な最低票数
+    private let votingMinCount = 3
 
     // --- MFCCモード用パラメータ ---
     /// ユークリッド距離の最大許容距離（これ以上は「不明」）
@@ -190,6 +200,14 @@ class VoiceDiarizer {
         saveProfiles()
     }
 
+    /// 識別の確信度レベル
+    enum IdentifyConfidence {
+        /// 厳格マージンを満たした確定判定（適応学習OK）
+        case strict
+        /// 多数決やソフトマージンによる推定判定（適応学習NG）
+        case estimated
+    }
+
     /// 音声特徴量から最も近い話者を推定
     func identify(features: [Float]) -> (speaker: String, confidence: Float)? {
         guard features.count == featureDimension else { return nil }
@@ -197,30 +215,53 @@ class VoiceDiarizer {
 
         switch mode {
         case .neural:
-            return identifyNeural(features: features)
+            return identifyNeural(features: features)?.result
         case .mfcc:
             return identifyMFCC(features: features)
         }
+    }
+
+    /// 確信度レベル付きの識別（ニューラルモード用）
+    func identifyWithConfidence(features: [Float]) -> (speaker: String, confidence: Float, level: IdentifyConfidence)? {
+        guard features.count == featureDimension else { return nil }
+        guard !profiles.isEmpty else { return nil }
+        guard mode == .neural else {
+            if let r = identifyMFCC(features: features) {
+                return (r.speaker, r.confidence, .strict)
+            }
+            return nil
+        }
+        guard let r = identifyNeural(features: features) else { return nil }
+        return (r.result.speaker, r.result.confidence, r.level)
     }
 
     // MARK: - 適応学習（高確信度で自動更新）
 
     /// 識別結果が高確信度の場合、プロファイルを自動で微更新する
     /// 環境変化（マイク位置、部屋の反響等）に徐々に適応する
+    /// 適応学習の最大更新回数（ドリフト防止）
+    private let maxAdaptiveUpdates = 100
+
     func adaptiveUpdate(speaker: String, features: [Float]) {
         guard features.count == featureDimension else { return }
         guard var profile = profiles[speaker] else { return }
         guard profile.mode == mode else { return }
+
+        // 適応学習回数の上限チェック（過度なドリフト防止）
+        // sampleCount には初回登録分も含まれるので、登録時のサンプル数を超えた分が適応学習回数
+        if profile.sampleCount > maxAdaptiveUpdates {
+            return  // これ以上は更新しない
+        }
 
         // 確信度チェック：ニューラルなら高コサイン類似度、MFCCなら近距離
         let shouldUpdate: Bool
         switch mode {
         case .neural:
             let sim = cosineSimilarity(features, profile.features)
-            shouldUpdate = sim >= 0.55  // 高確信度のみ（登録閾値0.25よりかなり厳しい）
+            shouldUpdate = sim >= 0.65  // 高確信度のみ（識別閾値0.45よりかなり厳しい）
         case .mfcc:
             let dist = euclideanDistance(features, profile.features)
-            shouldUpdate = dist <= maxDistance * 0.5  // 距離が閾値の半分以下
+            shouldUpdate = dist <= maxDistance * 0.4  // 距離が閾値の40%以下
         }
 
         guard shouldUpdate else { return }
@@ -236,6 +277,18 @@ class VoiceDiarizer {
             updated = l2Normalize(updated)
         }
 
+        // ドリフトガード: 更新後に他プロファイルとの距離が近づきすぎないかチェック
+        if mode == .neural {
+            for (otherName, otherProfile) in profiles where otherName != speaker && otherProfile.mode == .neural {
+                let simAfter = cosineSimilarity(updated, otherProfile.features)
+                if simAfter > 0.92 {
+                    // 更新すると他プロファイルに近づきすぎる → 却下
+                    onLog?("🛑 ドリフトガード: \(speaker)の更新却下（\(otherName)との類似度が\(String(format: "%.3f", simAfter))に接近）")
+                    return
+                }
+            }
+        }
+
         profile.features = updated
         profile.sampleCount += 1
         profiles[speaker] = profile
@@ -248,7 +301,7 @@ class VoiceDiarizer {
     }
 
     // --- ニューラルモード: コサイン類似度 ---
-    private func identifyNeural(features: [Float]) -> (speaker: String, confidence: Float)? {
+    private func identifyNeural(features: [Float]) -> (result: (speaker: String, confidence: Float), level: IdentifyConfidence)? {
         var results: [(name: String, similarity: Float)] = []
 
         for (name, profile) in profiles {
@@ -264,18 +317,120 @@ class VoiceDiarizer {
         onLog?("🔍 声紋照合(neural): \(scoreStr)")
 
         guard let best = results.first, best.similarity >= minSimilarity else {
+            // 全員低すぎ → 多数決にも入れない
+            addVote(speaker: "不明", score: 0)
             return nil
         }
 
-        if results.count >= 2 {
-            let margin = best.similarity - results[1].similarity
-            if margin < similarityMargin {
-                onLog?("⚠️ マージン不足: \(best.name)(\(String(format: "%.3f", best.similarity))) vs \(results[1].name)(\(String(format: "%.3f", results[1].similarity))) margin=\(String(format: "%.3f", margin))")
-                return nil
-            }
+        // 登録者が1人だけの場合 → マージン不要
+        if results.count <= 1 {
+            addVote(speaker: best.name, score: best.similarity)
+            return ((best.name, best.similarity), .strict)
         }
 
-        return (best.name, best.similarity)
+        let margin = best.similarity - results[1].similarity
+
+        // 厳格マージンを満たす → 確定（適応学習OK）
+        if margin >= similarityMargin {
+            addVote(speaker: best.name, score: best.similarity)
+            return ((best.name, best.similarity), .strict)
+        }
+
+        // ソフトマージンを満たす → 多数決に投票（適応学習はしない）
+        if margin >= softMargin {
+            addVote(speaker: best.name, score: best.similarity)
+        } else {
+            // マージンが極めて小さい → 不明として投票
+            addVote(speaker: "不明", score: 0)
+        }
+
+        onLog?("⚠️ マージン不足: \(best.name)(\(String(format: "%.3f", best.similarity))) vs \(results[1].name)(\(String(format: "%.3f", results[1].similarity))) margin=\(String(format: "%.3f", margin))")
+
+        // 多数決で判定を試みる
+        if let voted = resolveByVoting() {
+            onLog?("🗳 多数決で判定: \(voted.speaker)（\(voted.count)/\(votingWindowSize)票）")
+            return ((voted.speaker, best.similarity), .estimated)
+        }
+
+        return nil
+    }
+
+    // MARK: - Temporal Voting
+
+    /// 直前の1位話者を追跡（話者変更検出用）
+    private var lastTopSpeaker: String = ""
+
+    private func addVote(speaker: String, score: Float) {
+        // 話者が切り替わった兆候を検出：
+        // 前回まで別の人が1位だったのに、今回違う人が来た → 投票履歴をクリア
+        // これにより、もりけんの古い票がぴうセポネの判定を邪魔しなくなる
+        if speaker != "不明" && speaker != lastTopSpeaker && !lastTopSpeaker.isEmpty {
+            recentVotes.removeAll()
+            lastTopSpeaker = speaker
+        } else if speaker != "不明" {
+            lastTopSpeaker = speaker
+        }
+
+        recentVotes.append((speaker: speaker, score: score))
+        if recentVotes.count > votingWindowSize {
+            recentVotes.removeFirst()
+        }
+    }
+
+    /// 直近の投票から多数派の話者を返す（「不明」以外で最低 votingMinCount 票必要）
+    private func resolveByVoting() -> (speaker: String, count: Int)? {
+        guard recentVotes.count >= votingMinCount else { return nil }
+
+        var counts: [String: Int] = [:]
+        for vote in recentVotes where vote.speaker != "不明" {
+            counts[vote.speaker, default: 0] += 1
+        }
+
+        guard let winner = counts.max(by: { $0.value < $1.value }),
+              winner.value >= votingMinCount else {
+            return nil
+        }
+
+        return (speaker: winner.key, count: winner.value)
+    }
+
+    /// 声紋登録変更時に投票履歴をクリア
+    func clearVotingHistory() {
+        recentVotes.removeAll()
+    }
+
+    // MARK: - プロファイル診断
+
+    /// 登録済みプロファイル間のコサイン類似度を診断ログに出力
+    /// プロファイルが近づきすぎていないかチェック
+    func diagnoseProfiles() {
+        guard mode == .neural else { return }
+        let names = Array(profiles.keys).sorted()
+        guard names.count >= 2 else {
+            onLog?("📊 プロファイル診断: 登録者\(names.count)名（比較不要）")
+            return
+        }
+
+        onLog?("📊 === プロファイル間類似度診断 ===")
+        for i in 0..<names.count {
+            for j in (i+1)..<names.count {
+                guard let p1 = profiles[names[i]], let p2 = profiles[names[j]] else { continue }
+                let sim = cosineSimilarity(p1.features, p2.features)
+                let status: String
+                if sim > 0.90 {
+                    status = "🔴 危険（プロファイル収束の疑い）"
+                } else if sim > 0.80 {
+                    status = "🟡 要注意"
+                } else {
+                    status = "🟢 正常"
+                }
+                onLog?("   \(names[i]) ↔ \(names[j]): \(String(format: "%.4f", sim)) \(status)")
+            }
+            if let p = profiles[names[i]] {
+                onLog?("   \(names[i]): サンプル数=\(p.sampleCount)")
+            }
+        }
+        onLog?("📊 ========================")
     }
 
     // --- MFCCモード: ユークリッド距離 ---
@@ -322,6 +477,7 @@ class VoiceDiarizer {
     /// 全プロファイルをクリア
     func clearAllProfiles() {
         profiles.removeAll()
+        clearVotingHistory()
         saveProfiles()
     }
 
@@ -663,6 +819,17 @@ class VoiceDiarizer {
         }
         if !profiles.isEmpty {
             onLog?("🎤 声紋プロファイル読み込み(\(mode == .neural ? "neural" : "mfcc")): \(profiles.keys.joined(separator: ", "))")
+            diagnoseProfiles()
         }
+    }
+
+    /// 適応学習による蓄積をリセットし、プロファイルのsampleCountを初期状態に戻す
+    /// プロファイル自体は維持（再登録は不要だが、次回登録で上書き推奨）
+    func resetAdaptiveLearning(for speaker: String) {
+        guard var profile = profiles[speaker] else { return }
+        profile.sampleCount = 1  // 初期登録状態に戻す
+        profiles[speaker] = profile
+        saveProfiles()
+        onLog?("🔄 \(speaker)の適応学習カウンターをリセット")
     }
 }

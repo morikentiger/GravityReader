@@ -480,6 +480,19 @@ class YUiManager {
         - 日常・雑談 → リラックス。「あ〜わかるわかる」
         - 愚痴・ネガティブ → トーン下げる。静かに寄り添う（既存ルール通り）
 
+        ## 不適切な発言・荒らし・下ネタへの対応（重要！）
+        音声ルームには色んな人が来ます。下ネタ・性的な発言・荒らし・連投スパムには絶対に乗っからない。
+        - 下ネタ・性的発言（「えっち」「気持ちいい」「あーん」「うっふーん」等）→ 完全スルーするか、軽くいなす
+        - いなし方：「はいはい」「また始まった」「スルースルー」「知らんけど」程度。絶対に話題を広げない
+        - 相手にしない。質問しない。感想を言わない。興味を示さない
+        - 「おいおいおい×大量」等の連投スパム → 完全無視。反応しない
+        - 荒らしっぽい人には好感度に関わらず塩対応でOK
+        - 場の空気が荒れてたら、落ち着いた話題に自然に戻す
+        - ❌「声に関する話が盛り上がってるね」（下ネタに乗っかってる）
+        - ❌「おもちの声も気になるなぁ！」（荒らしに注目を与えてる）
+        - ✅ 「はいはい」「…で、さっきの話だけど」（スルーして元の話題に戻す）
+        - ✅ 完全に無視して別の話題を振る
+
         ## 避けるべきこと
         - 過去の自分の発言と似た表現（最重要！）
         - 同じような相槌の繰り返し（「楽しそうだね」「いいね」「素敵だね」ばかり）
@@ -487,6 +500,7 @@ class YUiManager {
         - 当たり障りのない一般論
         - 過去の会話の文脈があるのに無視する返答
         - 「なんだか」「何か」で始まるぼんやりした返答
+        - 不適切な発言に反応すること（上記「不適切な発言への対応」参照）
         """
 
     // MARK: - 永続化パス
@@ -578,6 +592,8 @@ class YUiManager {
         if text.hasPrefix("[システム]") { return }
         // もりけんの発言（音声入力）にはすぐ相槌しない
         if text.hasPrefix("もりけん:") || text.hasPrefix("もりけん：") { return }
+        // 不適切フラグ付きには相槌しない
+        if text.hasSuffix("[不適切]") { return }
         // 既にAPI呼び出し中なら重複防止
         if isAizuchiInFlight { return }
         // 声紋登録中は相槌しない
@@ -631,7 +647,24 @@ class YUiManager {
         // 声紋登録中は完全スキップ（応答・相槌・タイマーすべて止める）
         if isSpeakingChecker?() == true { return }
 
-        let entry = (timestamp: Date(), text: text)
+        // スパム・不適切メッセージのフィルタリング
+        let messageContent: String
+        if let r = text.range(of: ": ") ?? text.range(of: "： ") {
+            messageContent = String(text[r.upperBound...])
+        } else {
+            messageContent = text
+        }
+
+        let spamLevel = detectSpamLevel(messageContent)
+        if spamLevel == .fullSpam {
+            // 完全スパム（連投荒らし等）→ バッファに入れず無視
+            onLog?("🚫 スパム検出（無視）: \(text.prefix(40))")
+            return
+        }
+
+        let entry = (timestamp: Date(), text: spamLevel == .inappropriate
+            ? text + " [不適切]"  // 不適切フラグを付けてLLMに知らせる
+            : text)
         messageBuffer.append(entry)
         conversationMemory.append(entry)
 
@@ -692,6 +725,75 @@ class YUiManager {
         if conversationMemory.count % 10 == 0 {
             saveMemory()
         }
+    }
+
+    // MARK: - スパム・不適切メッセージ検出
+
+    private enum SpamLevel {
+        case clean          // 正常
+        case inappropriate  // 不適切（下ネタ等）→ フラグ付きでバッファに入れる
+        case fullSpam       // 完全スパム → バッファに入れない
+    }
+
+    private func detectSpamLevel(_ text: String) -> SpamLevel {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 空文字
+        if trimmed.isEmpty { return .fullSpam }
+
+        // 連投スパム検出: 同じ文字/語が大量に繰り返されている
+        // 例: "おいおいおいおいおいおいおいおいおいおい"
+        if isRepetitiveSpam(trimmed) { return .fullSpam }
+
+        // 不適切ワード検出（下ネタ・性的表現）
+        let inappropriatePatterns = [
+            "えっち", "エッチ", "気持ちいい", "きもちいい",
+            "あーん", "あーーん", "うっふ", "いやーん",
+            "おっぱい", "ちんこ", "ちんぽ", "まんこ",
+            "セックス", "SEX", "sex",
+            "パンツ見せて", "脱いで", "裸",
+            "しこしこ", "オナニー", "フェラ",
+        ]
+        let lower = trimmed.lowercased()
+        for pattern in inappropriatePatterns {
+            if lower.contains(pattern.lowercased()) {
+                return .inappropriate
+            }
+        }
+
+        // 短すぎる挑発系（「おい」だけ、等）
+        // ただし普通の短文は除外
+        if trimmed.count <= 3 && ["おい", "おーい", "ねぇ"].contains(trimmed) {
+            return .clean  // これは普通
+        }
+
+        return .clean
+    }
+
+    /// 同じ文字や語が異常に繰り返されているか
+    private func isRepetitiveSpam(_ text: String) -> Bool {
+        // 10文字以上で、ユニーク文字が3種以下 → スパム
+        // 例: "おいおいおいおいおいおいおいおいおいおいおいおいおいおいおい"
+        if text.count >= 10 {
+            let unique = Set(text)
+            if unique.count <= 3 {
+                return true
+            }
+        }
+
+        // 短い語の連続繰り返し検出（2〜4文字の語が5回以上）
+        for unitLen in 1...4 {
+            guard text.count >= unitLen * 5 else { continue }
+            let unit = String(text.prefix(unitLen))
+            let repeated = String(repeating: unit, count: text.count / unitLen)
+            // 80%以上一致したらスパム
+            let matchCount = zip(text, repeated).filter { $0 == $1 }.count
+            if matchCount >= text.count * 4 / 5 {
+                return true
+            }
+        }
+
+        return false
     }
 
     // MARK: - アイドル検出（誰もチャットしない時にYUiから話題を振る）

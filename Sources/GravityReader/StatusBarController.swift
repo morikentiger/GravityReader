@@ -92,6 +92,10 @@ class StatusBarController {
         noEnrollItem.isEnabled = false
         enrollSubmenu.addItem(noEnrollItem)
         enrollSubmenu.addItem(.separator())
+        let manualEnrollItem = NSMenuItem(title: "✏️ 名前を入力して登録...", action: #selector(manualEnrollment), keyEquivalent: "")
+        manualEnrollItem.target = self
+        enrollSubmenu.addItem(manualEnrollItem)
+        enrollSubmenu.addItem(.separator())
         let clearAllItem = NSMenuItem(title: "🗑 全声紋をクリア", action: #selector(clearAllVoiceProfiles), keyEquivalent: "")
         clearAllItem.target = self
         enrollSubmenu.addItem(clearAllItem)
@@ -192,7 +196,49 @@ class StatusBarController {
         onClearAllVoiceProfiles?()
     }
 
+    @objc private func manualEnrollment() {
+        // メニューのトラッキングループ完了後にモーダルを表示（フリーズ防止）
+        DispatchQueue.main.async { [weak self] in
+            self?.showManualEnrollmentDialog()
+        }
+    }
+
+    private func showManualEnrollmentDialog() {
+        let alert = NSAlert()
+        alert.messageText = "声紋登録"
+        alert.informativeText = "登録するユーザー名を入力してください:"
+        alert.addButton(withTitle: "登録開始")
+        alert.addButton(withTitle: "キャンセル")
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 250, height: 24))
+        input.placeholderString = "ユーザー名"
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let name = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                onStartEnrollment?(name)
+            }
+        }
+    }
+
     @objc private func setAPIKey() {
+        // メニューのトラッキングループ完了後にウィンドウを表示（フリーズ防止）
+        DispatchQueue.main.async { [weak self] in
+            self?.showAPIKeyWindow()
+        }
+    }
+
+    private func showAPIKeyWindow() {
+        // 既に開いている場合は前面に出すだけ
+        if let existing = apiKeyWindow {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 160),
             styleMask: [.titled, .closable],
@@ -241,7 +287,7 @@ class StatusBarController {
 
         apiKeyWindow = window
         apiKeyInput = input
-    }
+    }  // end showAPIKeyWindow
 
     private var apiKeyWindow: NSWindow?
     private var apiKeyInput: NSTextField?
@@ -342,6 +388,12 @@ class StatusBarController {
         userVoiceSubmenu.removeAllItems()
         enrollSubmenu.removeAllItems()
 
+        // 手動登録は常に表示
+        let manualItem = NSMenuItem(title: "✏️ 名前を入力して登録...", action: #selector(manualEnrollment), keyEquivalent: "")
+        manualItem.target = self
+        enrollSubmenu.addItem(manualItem)
+        enrollSubmenu.addItem(.separator())
+
         if users.isEmpty {
             let noUsersItem = NSMenuItem(title: "（読み上げ開始後にユーザーが表示されます）", action: nil, keyEquivalent: "")
             noUsersItem.isEnabled = false
@@ -350,6 +402,11 @@ class StatusBarController {
             let noEnrollItem = NSMenuItem(title: "（読み上げ開始後にユーザーが表示されます）", action: nil, keyEquivalent: "")
             noEnrollItem.isEnabled = false
             enrollSubmenu.addItem(noEnrollItem)
+
+            enrollSubmenu.addItem(.separator())
+            let clearAllItem = NSMenuItem(title: "🗑 全声紋をクリア", action: #selector(clearAllVoiceProfiles), keyEquivalent: "")
+            clearAllItem.target = self
+            enrollSubmenu.addItem(clearAllItem)
             return
         }
 
@@ -392,6 +449,11 @@ class StatusBarController {
             enrollItem.representedObject = user
             enrollSubmenu.addItem(enrollItem)
         }
+
+        enrollSubmenu.addItem(.separator())
+        let clearAllItem = NSMenuItem(title: "🗑 全声紋をクリア", action: #selector(clearAllVoiceProfiles), keyEquivalent: "")
+        clearAllItem.target = self
+        enrollSubmenu.addItem(clearAllItem)
     }
 
     private func buildVoicePickerSubmenu(forUser user: String) -> NSMenu {

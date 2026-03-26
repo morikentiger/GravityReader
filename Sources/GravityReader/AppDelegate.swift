@@ -172,6 +172,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self.preferencesController?.onSpeechRateChanged = { [weak self] rate in
                     self?.logWindowController?.addEntry("🔧 読み上げ速度: \(String(format: "%.2f", rate))")
                 }
+                self.preferencesController?.onReadingDictChanged = { [weak self] dict in
+                    guard let sm = self?.captureManager?.speechManager else { return }
+                    // SpeechManagerの辞書を同期（UserDefaultsは既にPreferencesで保存済み）
+                    for (word, reading) in dict {
+                        sm.registerReading(word: word, reading: reading)
+                    }
+                    // 削除された項目も反映
+                    for entry in sm.readingDictionaryEntries() {
+                        if dict[entry.word] == nil {
+                            sm.removeReading(word: entry.word)
+                        }
+                    }
+                }
             }
             self.preferencesController?.showWindow()
         }

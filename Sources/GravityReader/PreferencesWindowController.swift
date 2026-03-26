@@ -39,6 +39,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
     var onFrequencyChanged: ((YUiFrequency) -> Void)?
     var onVoicevoxURLChanged: ((String) -> Void)?
     var onSpeechRateChanged: ((Float) -> Void)?
+    var onReadingDictChanged: (([String: String]) -> Void)?
 
     // MARK: - Controls (kept as ivars for action wiring)
 
@@ -62,6 +63,11 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
     // Notification tab
     private var rulesTableView: NSTableView!
     private var notificationRules: [NotificationRule] = []
+
+    // Reading dictionary tab
+    private var dictTableView: NSTableView!
+    private var dictEntries: [(word: String, reading: String)] = []
+    private let dictDefaultsKey = "GR_ReadingDictionary"
 
     // ────────────────────────────────────────────
 
@@ -92,10 +98,12 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         tabView.addTabViewItem(makeYUiTab())
         tabView.addTabViewItem(makeVoiceTab())
         tabView.addTabViewItem(makeNotificationTab())
+        tabView.addTabViewItem(makeDictionaryTab())
 
         window.contentView!.addSubview(tabView)
 
         loadNotificationRules()
+        loadDictEntries()
     }
 
     // MARK: - Tab Builders
@@ -338,6 +346,58 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         return item
     }
 
+    private func makeDictionaryTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "dictionary")
+        item.label = "読み辞書"
+
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 340))
+
+        let header = makeLabel("読み間違いを修正する辞書（表記 → 読み）", frame: NSRect(x: 20, y: 300, width: 440, height: 20))
+        view.addSubview(header)
+
+        // ScrollView + TableView
+        let scrollView = NSScrollView(frame: NSRect(x: 20, y: 60, width: 440, height: 235))
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+        scrollView.autoresizingMask = [.width, .height]
+
+        dictTableView = NSTableView()
+        dictTableView.rowHeight = 22
+        dictTableView.usesAlternatingRowBackgroundColors = true
+        dictTableView.gridStyleMask = .solidHorizontalGridLineMask
+        dictTableView.dataSource = self
+        dictTableView.delegate = self
+
+        let wordCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("word"))
+        wordCol.title = "表記"
+        wordCol.width = 180
+        wordCol.minWidth = 80
+        dictTableView.addTableColumn(wordCol)
+
+        let readingCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("reading"))
+        readingCol.title = "読み"
+        readingCol.width = 220
+        readingCol.minWidth = 80
+        dictTableView.addTableColumn(readingCol)
+
+        scrollView.documentView = dictTableView
+        view.addSubview(scrollView)
+
+        // Buttons
+        let addBtn = NSButton(title: "＋ 追加", target: self, action: #selector(addDictEntry(_:)))
+        addBtn.frame = NSRect(x: 20, y: 22, width: 80, height: 28)
+        addBtn.bezelStyle = .rounded
+        view.addSubview(addBtn)
+
+        let removeBtn = NSButton(title: "－ 削除", target: self, action: #selector(removeDictEntry(_:)))
+        removeBtn.frame = NSRect(x: 110, y: 22, width: 80, height: 28)
+        removeBtn.bezelStyle = .rounded
+        view.addSubview(removeBtn)
+
+        item.view = view
+        return item
+    }
+
     // MARK: - Helpers
 
     private func makeLabel(_ text: String, frame: NSRect) -> NSTextField {
@@ -494,6 +554,68 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         }
     }
 
+    // MARK: - Actions: Dictionary Tab
+
+    @objc private func addDictEntry(_ sender: Any) {
+        let alert = NSAlert()
+        alert.messageText = "読み辞書に登録"
+        alert.informativeText = "表記と読みを入力してください:"
+        alert.addButton(withTitle: "追加")
+        alert.addButton(withTitle: "キャンセル")
+
+        let accessoryView = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 60))
+
+        let wordField = NSTextField(frame: NSRect(x: 0, y: 32, width: 140, height: 24))
+        wordField.placeholderString = "表記（例: 風）"
+        accessoryView.addSubview(wordField)
+
+        let arrowLabel = NSTextField(labelWithString: "→")
+        arrowLabel.frame = NSRect(x: 148, y: 34, width: 16, height: 20)
+        accessoryView.addSubview(arrowLabel)
+
+        let readingField = NSTextField(frame: NSRect(x: 168, y: 32, width: 132, height: 24))
+        readingField.placeholderString = "読み（例: かぜ）"
+        accessoryView.addSubview(readingField)
+
+        alert.accessoryView = accessoryView
+        alert.window.initialFirstResponder = wordField
+
+        guard let window = self.window else { return }
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            let word = wordField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let reading = readingField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !word.isEmpty, !reading.isEmpty else { return }
+            self?.dictEntries.append((word: word, reading: reading))
+            self?.saveDictEntries()
+            self?.dictTableView.reloadData()
+        }
+    }
+
+    @objc private func removeDictEntry(_ sender: Any) {
+        let row = dictTableView.selectedRow
+        guard row >= 0, row < dictEntries.count else { return }
+        dictEntries.remove(at: row)
+        saveDictEntries()
+        dictTableView.reloadData()
+    }
+
+    // MARK: - Dictionary Persistence
+
+    private func loadDictEntries() {
+        guard let dict = UserDefaults.standard.dictionary(forKey: dictDefaultsKey) as? [String: String] else { return }
+        dictEntries = dict.map { (word: $0.key, reading: $0.value) }.sorted { $0.word < $1.word }
+    }
+
+    private func saveDictEntries() {
+        var dict: [String: String] = [:]
+        for entry in dictEntries {
+            dict[entry.word] = entry.reading
+        }
+        UserDefaults.standard.set(dict, forKey: dictDefaultsKey)
+        onReadingDictChanged?(dict)
+    }
+
     // MARK: - Show
 
     func showWindow() {
@@ -507,11 +629,35 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
 extension PreferencesWindowController: NSTableViewDataSource, NSTableViewDelegate {
 
     func numberOfRows(in tableView: NSTableView) -> Int {
+        if tableView === dictTableView {
+            return dictEntries.count
+        }
         return notificationRules.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row < notificationRules.count, let colID = tableColumn?.identifier.rawValue else { return nil }
+        guard let colID = tableColumn?.identifier.rawValue else { return nil }
+
+        // 読み辞書テーブル
+        if tableView === dictTableView {
+            guard row < dictEntries.count else { return nil }
+            let entry = dictEntries[row]
+            switch colID {
+            case "word":
+                let label = NSTextField(labelWithString: entry.word)
+                label.font = .systemFont(ofSize: 12)
+                return label
+            case "reading":
+                let label = NSTextField(labelWithString: entry.reading)
+                label.font = .systemFont(ofSize: 12)
+                return label
+            default:
+                return nil
+            }
+        }
+
+        // 通知フィルタテーブル
+        guard row < notificationRules.count else { return nil }
         let rule = notificationRules[row]
 
         switch colID {
