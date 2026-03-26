@@ -7,6 +7,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var logWindowController: LogWindowController?
     private var yuiManager: YUiManager?
     private var voiceManager: VoiceTranscriptionManager?
+    private var audioLevelMonitor: AudioLevelMonitor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -17,12 +18,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         captureManager?.logWindow = logWindowController
 
         yuiManager = YUiManager()
-        yuiManager?.onResponse = { [weak self] response in
+        yuiManager?.onResponse = { [weak self] response, targetUser, likability in
             self?.logWindowController?.addEntry("🤖 YUi: \(response)", isYUi: true)
-            self?.captureManager?.speakText(response)
+            // 好感度に応じてYUiの声スタイルを変える
+            self?.speakAsYUi(response, likability: likability)
         }
         yuiManager?.onLog = { [weak self] message in
             self?.logWindowController?.addEntry(message)
+        }
+        yuiManager?.onAizuchi = { [weak self] aizuchi in
+            self?.logWindowController?.addEntry("🤖 YUi: \(aizuchi)", isYUi: true)
+            self?.captureManager?.speakText(aizuchi)
+        }
+        // 音声レベル監視（GRAVITYの音声出力を監視）
+        audioLevelMonitor = AudioLevelMonitor()
+        audioLevelMonitor?.onLog = { [weak self] message in
+            self?.logWindowController?.addEntry(message)
+        }
+
+        // 誰かが喋っている or TTS読み上げ中 → YUiは黙る
+        yuiManager?.isSpeakingChecker = { [weak self] in
+            let ttsSpeaking = self?.captureManager?.speechManager.isSpeaking ?? false
+            let someoneSpeaking = self?.audioLevelMonitor?.isSomeoneSpeaking ?? false
+            return ttsSpeaking || someoneSpeaking
         }
         captureManager?.yuiManager = yuiManager
 
@@ -31,7 +49,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         voiceManager?.onTranscription = { [weak self] text in
             let entry = "🎤 もりけん: \(text)"
             self?.logWindowController?.addEntry(entry, isYUi: false)
-            self?.captureManager?.speechManager.speak(text, forUser: "もりけん")
+            // もりけんは音声で喋ってるので読み上げ不要
             self?.yuiManager?.feedMessage("もりけん: \(text)")
         }
         voiceManager?.onLog = { [weak self] message in
@@ -51,13 +69,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController?.onToggle = { [weak self] isRunning in
             if isRunning {
                 self?.captureManager?.start()
+                self?.yuiManager?.startIdleMonitoring()
+                self?.audioLevelMonitor?.start()
             } else {
                 self?.captureManager?.stop()
+                self?.yuiManager?.stopIdleMonitoring()
+                self?.audioLevelMonitor?.stop()
             }
         }
 
         statusBarController?.onTest = { [weak self] in
             self?.captureManager?.speakTest()
+        }
+
+        statusBarController?.onDumpAXTree = { [weak self] in
+            self?.captureManager?.dumpAXTree()
         }
 
         statusBarController?.onShowLog = { [weak self] in
@@ -85,6 +111,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController?.onFrequencyChanged = { [weak self] freq in
             self?.yuiManager?.frequency = freq
             self?.logWindowController?.addEntry("⏱ YUi応答頻度: \(freq.rawValue) に変更しました")
+        }
+
+        statusBarController?.onModelToggle = { [weak self] in
+            guard let self = self, let yui = self.yuiManager else { return false }
+            let newVal = !yui.isUsingMinModel
+            yui.setUseMinModel(newVal)
+            let msg = newVal ? "🧠 モデル: gpt-4o-mini（節約モード）" : "🧠 モデル: gpt-4o（高品質）"
+            self.logWindowController?.addEntry(msg)
+            return newVal
         }
 
         // ユーザー別音声変更コールバック（メニューから）
@@ -136,6 +171,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // ログウィンドウを起動時に表示
         logWindowController?.show()
+    }
+
+    /// 好感度に応じたYUiの声スタイルで読み上げ
+    private func speakAsYUi(_ text: String, likability: Int) {
+        guard let sm = captureManager?.speechManager else { return }
+
+        // VOICEVOXのスタイルを好感度で選ぶ
+        // 好感度が高い → 明るい・嬉しそうな声、低い → 落ち着いた・クールな声
+        let speakers = sm.cachedSpeakers
+        guard !speakers.isEmpty else {
+            sm.speak(text)
+            return
+        }
+
+        // YUi用のキャラクター名（四国めたんをベースに、スタイルを変える）
+        let yuiCharacter = "四国めたん"
+        let yuiStyles = speakers.filter { $0.name == yuiCharacter }
+
+        if !yuiStyles.isEmpty {
+            let style: String
+            switch likability {
+            case 75...:  style = "あまあま"    // 好感度高い → 甘い声
+            case 55..<75: style = "ノーマル"   // 普通
+            case 35..<55: style = "ツンツン"   // 微妙 → ツンツン
+            default:      style = "セクシー"   // 低い → クール
+            }
+
+            if let matched = yuiStyles.first(where: { $0.style == style }) {
+                sm.speak(text, withVoice: .voicevox(matched.id))
+                return
+            }
+            // スタイルが見つからなければノーマル
+            if let normal = yuiStyles.first {
+                sm.speak(text, withVoice: .voicevox(normal.id))
+                return
+            }
+        }
+
+        // 四国めたんがなければデフォルト
+        sm.speak(text)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        yuiManager?.flushAllMemory()
     }
 
     private func checkAccessibilityPermission() {

@@ -57,8 +57,6 @@ PLIST
 echo "🔏 Signing..."
 codesign --force --sign - "$APP_DIR"
 
-echo "✅ Done! Run: open $APP_DIR"
-echo ""
-echo "⚠️  初回起動後、以下の許可が必要です:"
-echo "   システム設定 > プライバシーとセキュリティ > アクセシビリティ → GravityReader を追加"
-echo "   システム設定 > プライバシーとセキュリティ > 画面収録 → GravityReader を追加"
+echo "✅ Done!"
+echo "   起動: open $APP_DIR"
+echo "   一括: bash run.sh （ビルド＋権限付与＋起動）"

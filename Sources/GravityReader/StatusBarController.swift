@@ -21,10 +21,12 @@ class StatusBarController {
     var onToggle: ((Bool) -> Void)?
     var onTest: (() -> Void)?
     var onShowLog: (() -> Void)?
+    var onDumpAXTree: (() -> Void)?
     var onSetAPIKey: ((String) -> Void)?
     var onVoiceChanged: ((VoiceMode) -> Void)?
     var onFrequencyChanged: ((YUiFrequency) -> Void)?
     var onUserVoiceChanged: ((String, VoiceMode) -> Void)?
+    var onModelToggle: (() -> Bool)?  // returns new isMinModel value
 
     private var voiceSubmenu: NSMenu!
     private var voiceMenuItem: NSMenuItem!
@@ -75,9 +77,20 @@ class StatusBarController {
         testItem.target = self
         menu.addItem(testItem)
 
+        let dumpItem = NSMenuItem(title: "🔍 AXツリー ダンプ", action: #selector(dumpAXTree), keyEquivalent: "d")
+        dumpItem.target = self
+        menu.addItem(dumpItem)
+
         let apiKeyItem = NSMenuItem(title: "🔑 APIキー設定", action: #selector(setAPIKey), keyEquivalent: "k")
         apiKeyItem.target = self
         menu.addItem(apiKeyItem)
+
+        // モデル切替
+        let isMin = UserDefaults.standard.bool(forKey: "YUiUseMinModel")
+        let modelItem = NSMenuItem(title: isMin ? "✓ gpt-4o-mini（節約）" : "  gpt-4o-mini（節約）", action: #selector(toggleModel), keyEquivalent: "")
+        modelItem.target = self
+        modelItem.tag = 999
+        menu.addItem(modelItem)
 
         // YUi応答頻度サブメニュー
         frequencySubmenu = NSMenu()
@@ -136,6 +149,10 @@ class StatusBarController {
 
     @objc private func testSpeech() {
         onTest?()
+    }
+
+    @objc private func dumpAXTree() {
+        onDumpAXTree?()
     }
 
     @objc private func setAPIKey() {
@@ -234,6 +251,16 @@ class StatusBarController {
             }
         }
         onFrequencyChanged?(freq)
+    }
+
+    @objc private func toggleModel() {
+        guard let newVal = onModelToggle?() else { return }
+        // メニュー項目のチェック更新
+        if let menu = statusItem.menu {
+            for item in menu.items where item.tag == 999 {
+                item.title = newVal ? "✓ gpt-4o-mini（節約）" : "  gpt-4o-mini（節約）"
+            }
+        }
     }
 
     // MARK: - Voice selection

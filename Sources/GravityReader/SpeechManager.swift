@@ -29,6 +29,10 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     /// キャッシュされたスピーカー一覧
     private(set) var cachedSpeakers: [VoicevoxSpeaker] = []
 
+    /// 読み辞書（表記 → 読み）
+    private(set) var readingDictionary: [String: String] = [:]
+    private let readingDictKey = "GR_ReadingDictionary"
+
     var onSpeakingStateChanged: ((Bool) -> Void)?
     var onLog: ((String) -> Void)?
 
@@ -48,6 +52,24 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
                 userVoiceMap[user] = stringToVoiceMode(modeStr)
             }
         }
+        // 読み辞書を復元
+        if let savedDict = UserDefaults.standard.dictionary(forKey: readingDictKey) as? [String: String] {
+            readingDictionary = savedDict
+        }
+        // デフォルト辞書（初回のみ）
+        if readingDictionary.isEmpty {
+            let defaults: [String: String] = [
+                "辛い": "つらい",
+                "C3PO": "シースリーピーオー",
+                "C-3PO": "シースリーピーオー",
+                "R2D2": "アールツーディーツー",
+                "R2-D2": "アールツーディーツー",
+                "w": "わら",
+                "www": "わらわら",
+            ]
+            readingDictionary = defaults
+            saveReadingDictionary()
+        }
     }
 
     // MARK: - Public
@@ -58,11 +80,74 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         speakNext()
     }
 
-    /// テキストをユーザー固有音声で読み上げ（未設定ならデフォルト）
-    func speak(_ text: String, forUser user: String) {
-        let voice = userVoiceMap[user] ?? voiceMode
+    /// テキストを指定した音声で読み上げ
+    func speak(_ text: String, withVoice voice: VoiceMode) {
         queue.append((text: text, voice: voice))
         speakNext()
+    }
+
+    /// テキストをユーザー固有音声で読み上げ（未設定なら自動割り当て）
+    func speak(_ text: String, forUser user: String) {
+        let voice = resolveVoice(for: user)
+        queue.append((text: text, voice: voice))
+        speakNext()
+    }
+
+    /// ユーザーの声を解決（未割り当てなら自動でVOICEVOXから割り当て）
+    private func resolveVoice(for user: String) -> VoiceMode {
+        // 完全一致
+        if let mode = userVoiceMap[user] { return mode }
+        // 部分一致
+        for (key, mode) in userVoiceMap {
+            if user.contains(key) || key.contains(user) { return mode }
+        }
+        // 未割り当て → 自動割り当て
+        if let auto = autoAssignVoice(for: user) {
+            return auto
+        }
+        return voiceMode
+    }
+
+    /// VOICEVOXの声を自動割り当て（他ユーザーと被らないように）
+    private func autoAssignVoice(for user: String) -> VoiceMode? {
+        guard !cachedSpeakers.isEmpty else { return nil }
+
+        // 使用済みのspeaker IDを集める
+        let usedIds = Set(userVoiceMap.values.compactMap { mode -> Int? in
+            if case .voicevox(let id) = mode { return id }
+            return nil
+        })
+
+        // 自動割り当て用の優先スピーカー（バリエーション豊かに）
+        let preferredNames = [
+            "ずんだもん", "四国めたん", "春日部つむぎ", "雨晴はう",
+            "波音リツ", "玄野武宏", "白上虎太郎", "青山龍星",
+            "冥鳴ひまり", "九州そら", "もち子さん", "剣崎雌雄",
+            "WhiteCUL", "後鬼", "No.7", "ちび式じい",
+            "櫻歌ミコ", "小夜/SAYO", "ナースロボ＿タイプＴ",
+        ]
+
+        // 優先リストから未使用を探す
+        for name in preferredNames {
+            if let speaker = cachedSpeakers.first(where: {
+                $0.name == name && !usedIds.contains($0.id)
+            }) {
+                let mode = VoiceMode.voicevox(speaker.id)
+                setVoiceForUser(user, mode: mode)
+                onLog?("🎤 \(user)に自動割り当て: \(speaker.name)（\(speaker.style)）")
+                return mode
+            }
+        }
+
+        // 優先リストが尽きたら、未使用のスピーカーから割り当て
+        if let speaker = cachedSpeakers.first(where: { !usedIds.contains($0.id) }) {
+            let mode = VoiceMode.voicevox(speaker.id)
+            setVoiceForUser(user, mode: mode)
+            onLog?("🎤 \(user)に自動割り当て: \(speaker.name)（\(speaker.style)）")
+            return mode
+        }
+
+        return nil
     }
 
     func stop() {
@@ -82,9 +167,9 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         saveUserVoiceMap()
     }
 
-    /// ユーザーのボイス割り当てを取得
+    /// ユーザーのボイス割り当てを取得（部分一致対応）
     func voiceForUser(_ userName: String) -> VoiceMode {
-        return userVoiceMap[userName] ?? voiceMode
+        return resolveVoice(for: userName)
     }
 
     /// 全ユーザーのボイス割り当てを取得
@@ -118,6 +203,45 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
             dict[user] = voiceModeToString(mode)
         }
         UserDefaults.standard.set(dict, forKey: "GR_UserVoiceMap")
+    }
+
+    // MARK: - 読み辞書
+
+    /// テキストに読み辞書を適用（TTS前に呼ぶ）
+    func applyReadingDictionary(_ text: String) -> String {
+        var result = text
+        // 長いキーから先にマッチさせる（部分置換の衝突防止）
+        let sortedKeys = readingDictionary.keys.sorted { $0.count > $1.count }
+        for key in sortedKeys {
+            if let reading = readingDictionary[key] {
+                result = result.replacingOccurrences(of: key, with: reading)
+            }
+        }
+        return result
+    }
+
+    /// 辞書に登録
+    func registerReading(word: String, reading: String) {
+        readingDictionary[word] = reading
+        saveReadingDictionary()
+        onLog?("📖 読み辞書登録: \(word) → \(reading)")
+    }
+
+    /// 辞書から削除
+    func removeReading(word: String) {
+        readingDictionary.removeValue(forKey: word)
+        saveReadingDictionary()
+        onLog?("📖 読み辞書削除: \(word)")
+    }
+
+    /// 辞書一覧を返す
+    func readingDictionaryEntries() -> [(word: String, reading: String)] {
+        return readingDictionary.map { (word: $0.key, reading: $0.value) }
+            .sorted { $0.word < $1.word }
+    }
+
+    private func saveReadingDictionary() {
+        UserDefaults.standard.set(readingDictionary, forKey: readingDictKey)
     }
 
     // MARK: - VOICEVOX スピーカー取得
@@ -168,7 +292,8 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     private func speakWithSystem(_ text: String) {
-        let utterance = AVSpeechUtterance(string: text)
+        let processed = applyReadingDictionary(text)
+        let utterance = AVSpeechUtterance(string: processed)
         utterance.voice = AVSpeechSynthesisVoice(language: "ja-JP")
         utterance.rate = 0.52
         utterance.pitchMultiplier = 1.0
@@ -177,7 +302,8 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     private func speakWithVoicevox(_ text: String, speaker: Int) {
-        let encodedText = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
+        let processed = applyReadingDictionary(text)
+        let encodedText = processed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? processed
         guard let queryURL = URL(string: "\(voicevoxBaseURL)/audio_query?text=\(encodedText)&speaker=\(speaker)") else {
             finishCurrentAndNext()
             return
