@@ -6,6 +6,7 @@ class GravityCaptureManager {
     private var timer: Timer?
     let speechManager = SpeechManager()
     var yuiManager: YUiManager?
+    var roomTranscription: RoomTranscriptionManager?
     private let gravityBundleID = "com.hiclub.gravity"
     private let pollInterval: TimeInterval = 2.0
 
@@ -66,6 +67,7 @@ class GravityCaptureManager {
             #"^\d{1,3}%$"#,             // "100%", "23%" 等のパーセンテージ
             #"^\d{1,2}$"#,              // "2", "3" 等の単独数字
             #"^あと\d+日$"#,             // "あと6日" 等のカウントダウン
+            #"^(初級|中級|上級|特級|超級)\d+$"#,  // "初級60000" 等のランク表示
         ]
         return patterns.compactMap { try? NSRegularExpression(pattern: $0) }
     }()
@@ -444,6 +446,10 @@ class GravityCaptureManager {
 
         let allTexts = allEntries.map { $0.text }
 
+        // 話者検出（volumeボタン監視）
+        let volumeSlots = parseVolumeSlots(allEntries)
+        detectSpeakers(from: volumeSlots)
+
         // 参加者リストを解析（UIノイズ除外前の生テキストから）
         parseParticipantList(allTexts)
 
@@ -500,6 +506,12 @@ class GravityCaptureManager {
                 continue
             }
 
+            // AXButton（volumeボタン等）はメッセージではないのでスキップ
+            if entry.role == "AXButton" {
+                i += 1
+                continue
+            }
+
             // AXGenericElement = メッセージ本文
             let text = entry.text
 
@@ -523,15 +535,24 @@ class GravityCaptureManager {
 
             statusBar?.setLastRead(text)
 
+            // 声紋登録中は全部止める（読み上げもYUiも）
+            let enrolling = roomTranscription?.isEnrolling ?? false
+
             // ユーザー別ボイスで読み上げ + ログに発言者を表示
             if let user = lastDetectedUser {
                 logWindow?.addEntry("[\(user)] \(text)")
-                speechManager.speak(text, forUser: user)
-                yuiManager?.feedMessage("\(user): \(text)")
+                if !enrolling {
+                    speechManager.speak(text, forUser: user)
+                    yuiManager?.feedMessage("\(user): \(text)")
+                }
+                // 声紋学習トリガー: テキストチャットした人の声を覚える
+                roomTranscription?.notifyChatMessage(speaker: user)
             } else {
                 logWindow?.addEntry(text)
-                speechManager.speak(text)
-                yuiManager?.feedMessage(text)
+                if !enrolling {
+                    speechManager.speak(text)
+                    yuiManager?.feedMessage(text)
+                }
             }
 
             i += 1
@@ -542,8 +563,116 @@ class GravityCaptureManager {
 
     /// AXロールとテキストのペア
     struct AXTextEntry {
-        let role: String  // "AXStaticText" = ユーザー名, "AXGenericElement" = メッセージ
+        let role: String  // "AXStaticText" = ユーザー名, "AXGenericElement" = メッセージ, "AXButton" = ボタン
         let text: String
+    }
+
+    // MARK: - 話者検出（volume ボタン監視）
+
+    /// 現在マイクで喋っている人（AXツリーのvolumeボタンから検出）
+    private(set) var currentSpeakers: [String] = []
+
+    /// 誰かがマイクで喋っているか
+    var isSomeoneSpeaking: Bool { !currentSpeakers.isEmpty }
+
+    /// 前回のvolumeボタン状態（変化検出用）
+    private var previousVolumeStates: [VolumeSlot] = []
+
+    /// スピーカースロット情報
+    struct VolumeSlot {
+        let slotIndex: Int      // 0=owner, 1=slot2, 2=slot3, ...
+        let buttonDesc: String  // "volume room owner", "volume no speak light", etc.
+        let isSpeaking: Bool
+    }
+
+    /// AXエントリからvolumeボタン状態を解析
+    private func parseVolumeSlots(_ entries: [AXTextEntry]) -> [VolumeSlot] {
+        var slots: [VolumeSlot] = []
+        var slotIndex = 0
+
+        for entry in entries {
+            guard entry.role == "AXButton", entry.text.hasPrefix("volume") else { continue }
+
+            // 話者判定ルール:
+            // "volume room owner" → オーナーのスロット。これだけでは喋ってるか不明。
+            //    "volume room owner speak" 等に変わったら喋ってる判定（要検証）
+            // "volume no speak light" → 確実に喋ってない
+            // "volume speak light" 等 "no speak" を含まず "room owner" だけでもない → 喋ってる
+            let desc = entry.text
+            let isSpeaking: Bool
+            if desc == "volume room owner" {
+                // 静的な表示 — 喋ってるかは不明なので false
+                // "volume room owner speak" 等の変化形がもしあれば true
+                isSpeaking = false
+            } else if desc.contains("room owner") && !desc.contains("no speak") {
+                // "volume room owner speak" 等 — owner が喋ってる
+                isSpeaking = true
+            } else {
+                // "no speak" を含む → 喋ってない / 含まない → 喋ってる
+                isSpeaking = !desc.contains("no speak")
+            }
+
+            slots.append(VolumeSlot(
+                slotIndex: slotIndex,
+                buttonDesc: desc,
+                isSpeaking: isSpeaking
+            ))
+            slotIndex += 1
+        }
+        return slots
+    }
+
+    /// volumeスロットから話者を特定
+    private func detectSpeakers(from slots: [VolumeSlot]) {
+        var speakers: [String] = []
+
+        for slot in slots where slot.isSpeaking {
+            if let name = speakerNameForSlot(slot.slotIndex) {
+                speakers.append(name)
+            } else {
+                speakers.append("スロット\(slot.slotIndex + 1)")
+            }
+        }
+
+        // 変化があった時だけログ（ボタン状態も出す）
+        let prevSet = Set(currentSpeakers)
+        let newSet = Set(speakers)
+        if prevSet != newSet {
+            if speakers.isEmpty && !currentSpeakers.isEmpty {
+                logWindow?.addEntry("🔇 発話終了")
+            } else if !speakers.isEmpty {
+                logWindow?.addEntry("🔊 発話中: \(speakers.joined(separator: ", "))")
+            }
+            // デバッグ: 全スロットの状態をログ
+            let stateStr = slots.map { "[\($0.slotIndex):\($0.buttonDesc)=\($0.isSpeaking ? "🔊" : "🔇")]" }.joined(separator: " ")
+            logWindow?.addEntry("🎚 スロット状態: \(stateStr)")
+        }
+        currentSpeakers = speakers
+    }
+
+    /// スロット番号からユーザー名を推定
+    /// slot 0 = ルーム主（もりけんなど、最初の参加者）
+    /// slot 1〜 = マイクに上がっている順
+    private func speakerNameForSlot(_ slotIndex: Int) -> String? {
+        // ルーム主 = currentParticipants の最初のユーザー（or detectedUsersの最初）
+        if slotIndex == 0 {
+            // "volume room owner" はルーム主
+            if let owner = currentParticipants.first {
+                return owner
+            }
+            if let owner = detectedUsers.first {
+                return owner
+            }
+            return "ルーム主"
+        }
+
+        // slot 1以降は参加者リストの順番に対応（仮定）
+        // currentParticipants[0] = owner, [1] = slot2, [2] = slot3, ...
+        if slotIndex < currentParticipants.count {
+            return currentParticipants[slotIndex]
+        }
+
+        return nil
     }
 
     /// ロール付きでテキストを取得
@@ -577,7 +706,7 @@ class GravityCaptureManager {
         // AXMenuBarは丸ごとスキップ（メニューの中身はチャットじゃない）
         if roleStr == "AXMenuBar" { return }
 
-        if roleStr == "AXGenericElement" || roleStr == "AXStaticText" {
+        if roleStr == "AXGenericElement" || roleStr == "AXStaticText" || roleStr == "AXButton" {
             for attr in [kAXDescriptionAttribute, kAXValueAttribute, kAXTitleAttribute] {
                 var val: AnyObject?
                 if AXUIElementCopyAttributeValue(el, attr as CFString, &val) == .success,
@@ -585,7 +714,12 @@ class GravityCaptureManager {
                     let trimmed = t.trimmingCharacters(in: .whitespaces)
                     guard !trimmed.isEmpty else { continue }
 
-                    if roleStr == "AXStaticText" {
+                    if roleStr == "AXButton" {
+                        // volumeボタンだけ拾う（話者検出用）
+                        if trimmed.hasPrefix("volume") {
+                            result.append(AXTextEntry(role: roleStr, text: trimmed))
+                        }
+                    } else if roleStr == "AXStaticText" {
                         // ユーザー名ラベルは同じ名前でも毎回取得する（ペアリングに必要）
                         result.append(AXTextEntry(role: roleStr, text: trimmed))
                     } else {

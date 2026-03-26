@@ -541,6 +541,8 @@ class YUiManager {
         if text.hasPrefix("もりけん:") || text.hasPrefix("もりけん：") { return }
         // 既にAPI呼び出し中なら重複防止
         if isAizuchiInFlight { return }
+        // 声紋登録中は相槌しない
+        if isSpeakingChecker?() == true { return }
 
         messagesSinceLastAizuchi += 1
 
@@ -548,8 +550,6 @@ class YUiManager {
         guard messagesSinceLastAizuchi >= aizuchiInterval else { return }
         guard Int.random(in: 0...2) == 0 else { return }  // 1/3の確率
         guard hasAPIKey else { return }
-        // 読み上げ中なら相槌しない（割り込み防止）
-        if isSpeakingChecker?() == true { return }
 
         messagesSinceLastAizuchi = 0
         isAizuchiInFlight = true
@@ -589,6 +589,9 @@ class YUiManager {
     // MARK: - メッセージ受信
 
     func feedMessage(_ text: String) {
+        // 声紋登録中は完全スキップ（応答・相槌・タイマーすべて止める）
+        if isSpeakingChecker?() == true { return }
+
         let entry = (timestamp: Date(), text: text)
         messageBuffer.append(entry)
         conversationMemory.append(entry)
@@ -679,9 +682,8 @@ class YUiManager {
             resetIdleTimer()
             return
         }
-        // 読み上げ中なら割り込まない — 5秒後にリトライ
+        // 声紋登録中は話題提供しない → 5秒後にリトライ
         if isSpeakingChecker?() == true {
-            onLog?("⏳ 読み上げ中のため話題提供を待機...")
             DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
                 self?.onIdleFired()
             }
@@ -819,9 +821,8 @@ class YUiManager {
             return
         }
 
-        // 読み上げ中なら割り込まない — 3秒後にリトライ
+        // 声紋登録中は応答しない → 3秒後にリトライ
         if isSpeakingChecker?() == true {
-            onLog?("⏳ 読み上げ中のため応答を待機...")
             let work = DispatchWorkItem { [weak self] in
                 self?.onTimerFired()
             }

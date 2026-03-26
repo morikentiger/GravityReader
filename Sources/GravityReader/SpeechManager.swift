@@ -16,7 +16,16 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
     private var audioPlayer: AVAudioPlayer?
     private var queue: [(text: String, voice: VoiceMode)] = []
-    private(set) var isSpeaking = false
+    private(set) var isSpeaking = false {
+        didSet {
+            if oldValue != isSpeaking {
+                onSpeakingChanged?(isSpeaking)
+            }
+        }
+    }
+
+    /// TTS再生状態変化コールバック
+    var onSpeakingChanged: ((Bool) -> Void)?
 
     /// デフォルト音声（メニューで選択されたもの）
     var voiceMode: VoiceMode = .system {

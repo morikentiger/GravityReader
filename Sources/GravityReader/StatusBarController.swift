@@ -27,12 +27,14 @@ class StatusBarController {
     var onFrequencyChanged: ((YUiFrequency) -> Void)?
     var onUserVoiceChanged: ((String, VoiceMode) -> Void)?
     var onModelToggle: (() -> Bool)?  // returns new isMinModel value
+    var onStartEnrollment: ((String) -> Void)?  // 指定ユーザー1人の声紋登録
 
     private var voiceSubmenu: NSMenu!
     private var voiceMenuItem: NSMenuItem!
     private var frequencySubmenu: NSMenu!
     private var userVoiceMenuItem: NSMenuItem!
     private var userVoiceSubmenu: NSMenu!
+    private var enrollSubmenu: NSMenu!
 
     /// VOICEVOX スピーカー一覧のキャッシュ
     private var speakersCache: [VoicevoxSpeaker] = []
@@ -80,6 +82,15 @@ class StatusBarController {
         let dumpItem = NSMenuItem(title: "🔍 AXツリー ダンプ", action: #selector(dumpAXTree), keyEquivalent: "d")
         dumpItem.target = self
         menu.addItem(dumpItem)
+
+        // 声紋登録サブメニュー（参加者一覧から個別に選択）
+        enrollSubmenu = NSMenu()
+        let noEnrollItem = NSMenuItem(title: "（読み上げ開始後にユーザーが表示されます）", action: nil, keyEquivalent: "")
+        noEnrollItem.isEnabled = false
+        enrollSubmenu.addItem(noEnrollItem)
+        let enrollMenuItem = NSMenuItem(title: "🎤 声紋登録", action: nil, keyEquivalent: "")
+        enrollMenuItem.submenu = enrollSubmenu
+        menu.addItem(enrollMenuItem)
 
         let apiKeyItem = NSMenuItem(title: "🔑 APIキー設定", action: #selector(setAPIKey), keyEquivalent: "k")
         apiKeyItem.target = self
@@ -153,6 +164,11 @@ class StatusBarController {
 
     @objc private func dumpAXTree() {
         onDumpAXTree?()
+    }
+
+    @objc private func startEnrollmentForUser(_ sender: NSMenuItem) {
+        guard let user = sender.representedObject as? String else { return }
+        onStartEnrollment?(user)
     }
 
     @objc private func setAPIKey() {
@@ -289,16 +305,26 @@ class StatusBarController {
 
     // MARK: - User voice menu
 
+    /// 登録済み声紋の名前リスト取得用
+    var getRegisteredVoiceProfiles: (() -> [String])?
+
     /// 検出済みユーザー一覧でメニューを更新
     func refreshUserList(_ users: [String]) {
         userVoiceSubmenu.removeAllItems()
+        enrollSubmenu.removeAllItems()
 
         if users.isEmpty {
             let noUsersItem = NSMenuItem(title: "（読み上げ開始後にユーザーが表示されます）", action: nil, keyEquivalent: "")
             noUsersItem.isEnabled = false
             userVoiceSubmenu.addItem(noUsersItem)
+
+            let noEnrollItem = NSMenuItem(title: "（読み上げ開始後にユーザーが表示されます）", action: nil, keyEquivalent: "")
+            noEnrollItem.isEnabled = false
+            enrollSubmenu.addItem(noEnrollItem)
             return
         }
+
+        let registered = Set(getRegisteredVoiceProfiles?() ?? [])
 
         // もりけん（ホスト）を先頭に追加
         let morickenItem = NSMenuItem(title: "もりけん", action: nil, keyEquivalent: "")
@@ -307,13 +333,35 @@ class StatusBarController {
         userVoiceSubmenu.addItem(morickenItem)
         userVoiceSubmenu.addItem(.separator())
 
+        // 声紋登録メニュー: もりけん
+        let morickenEnroll = NSMenuItem(
+            title: registered.contains("もりけん") ? "✅ もりけん（登録済み）" : "🎤 もりけん",
+            action: #selector(startEnrollmentForUser(_:)),
+            keyEquivalent: ""
+        )
+        morickenEnroll.target = self
+        morickenEnroll.representedObject = "もりけん"
+        enrollSubmenu.addItem(morickenEnroll)
+        enrollSubmenu.addItem(.separator())
+
         for user in users {
+            // ユーザー別音声
             let currentVoice = getUserVoice?(user) ?? .system
             let voiceLabel = voiceLabelFor(currentVoice)
             let item = NSMenuItem(title: "\(user)  [\(voiceLabel)]", action: nil, keyEquivalent: "")
             let sub = buildVoicePickerSubmenu(forUser: user)
             item.submenu = sub
             userVoiceSubmenu.addItem(item)
+
+            // 声紋登録
+            let enrollItem = NSMenuItem(
+                title: registered.contains(user) ? "✅ \(user)（登録済み）" : "🎤 \(user)",
+                action: #selector(startEnrollmentForUser(_:)),
+                keyEquivalent: ""
+            )
+            enrollItem.target = self
+            enrollItem.representedObject = user
+            enrollSubmenu.addItem(enrollItem)
         }
     }
 
