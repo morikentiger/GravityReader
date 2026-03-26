@@ -28,6 +28,7 @@ class StatusBarController {
     var onUserVoiceChanged: ((String, VoiceMode) -> Void)?
     var onModelToggle: (() -> Bool)?  // returns new isMinModel value
     var onStartEnrollment: ((String) -> Void)?  // 指定ユーザー1人の声紋登録
+    var onClearAllVoiceProfiles: (() -> Void)?  // 全声紋クリア
 
     private var voiceSubmenu: NSMenu!
     private var voiceMenuItem: NSMenuItem!
@@ -88,6 +89,10 @@ class StatusBarController {
         let noEnrollItem = NSMenuItem(title: "（読み上げ開始後にユーザーが表示されます）", action: nil, keyEquivalent: "")
         noEnrollItem.isEnabled = false
         enrollSubmenu.addItem(noEnrollItem)
+        enrollSubmenu.addItem(.separator())
+        let clearAllItem = NSMenuItem(title: "🗑 全声紋をクリア", action: #selector(clearAllVoiceProfiles), keyEquivalent: "")
+        clearAllItem.target = self
+        enrollSubmenu.addItem(clearAllItem)
         let enrollMenuItem = NSMenuItem(title: "🎤 声紋登録", action: nil, keyEquivalent: "")
         enrollMenuItem.submenu = enrollSubmenu
         menu.addItem(enrollMenuItem)
@@ -169,6 +174,10 @@ class StatusBarController {
     @objc private func startEnrollmentForUser(_ sender: NSMenuItem) {
         guard let user = sender.representedObject as? String else { return }
         onStartEnrollment?(user)
+    }
+
+    @objc private func clearAllVoiceProfiles() {
+        onClearAllVoiceProfiles?()
     }
 
     @objc private func setAPIKey() {

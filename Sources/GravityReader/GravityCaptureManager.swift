@@ -545,8 +545,6 @@ class GravityCaptureManager {
                     speechManager.speak(text, forUser: user)
                     yuiManager?.feedMessage("\(user): \(text)")
                 }
-                // 声紋学習トリガー: テキストチャットした人の声を覚える
-                roomTranscription?.notifyChatMessage(speaker: user)
             } else {
                 logWindow?.addEntry(text)
                 if !enrolling {

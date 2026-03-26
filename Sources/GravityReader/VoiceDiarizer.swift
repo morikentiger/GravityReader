@@ -2,8 +2,8 @@ import Foundation
 import Accelerate
 import AVFoundation
 
-/// 声の特徴量（MFCC）で話者を識別するクラス。
-/// テキストチャットと音声のタイミング相関で自動学習し、以降の音声を話者に帰属させる。
+/// 声の特徴量（MFCC + ピッチ）で話者を識別するクラス。
+/// ユークリッド距離で高精度な話者識別を行う。
 class VoiceDiarizer {
 
     // MARK: - 型定義
@@ -11,8 +11,8 @@ class VoiceDiarizer {
     /// 話者ごとの声紋プロファイル
     struct VoiceProfile {
         let name: String
-        /// MFCCベクトルの平均（13次元）
-        var mfccMean: [Float]
+        /// 特徴ベクトル
+        var features: [Float]
         /// 蓄積したサンプル数（加重平均用）
         var sampleCount: Int
     }
@@ -22,8 +22,11 @@ class VoiceDiarizer {
     /// 登録済みの声紋プロファイル
     private var profiles: [String: VoiceProfile] = [:]
 
-    /// マッチングの最低コサイン類似度（これ以下は「不明」）
-    var matchThreshold: Float = 0.75
+    /// ユークリッド距離の最大許容距離（これ以上は「不明」）
+    var maxDistance: Float = 30.0
+
+    /// 1位と2位の最低マージン比（2位の距離 / 1位の距離 がこれ以下なら「不明」）
+    var marginRatio: Float = 1.10
 
     /// ログコールバック
     var onLog: ((String) -> Void)?
@@ -32,11 +35,26 @@ class VoiceDiarizer {
 
     private let sampleRate: Float = 44100
     private let fftSize: Int = 2048
-    private let hopSize: Int = 1024
-    private let numMelBands: Int = 26
-    private let numMFCC: Int = 13
+    private let hopSize: Int = 512
+    private let numMelBands: Int = 40
+    private let numMFCCRaw: Int = 13
+    private let mfccStart: Int = 1          // C0スキップ
+    private var numMFCC: Int { numMFCCRaw - mfccStart }  // = 12
+
+    // ピッチ推定パラメータ
+    private let pitchMinFreq: Float = 85     // Hz（低い男性の声、60Hzノイズ回避）
+    private let pitchMaxFreq: Float = 400    // Hz（高い女性の声）
+    private let pitchNormMin: Float = 85
+    private let pitchNormMax: Float = 400
+
     private let melLowFreq: Float = 80
     private let melHighFreq: Float = 7600
+
+    /// 特徴ベクトルの次元数
+    /// MFCC C1-C12: mean(12) + std(12) + deltaMean(12) = 36
+    /// ピッチ: meanF0(1) + stdF0(1) + rangeF0(1) = 3
+    /// 合計: 39次元
+    var featureDimension: Int { numMFCC * 3 + 3 }
 
     /// メルフィルタバンク（初回生成後キャッシュ）
     private lazy var melFilterBank: [[Float]] = buildMelFilterBank()
@@ -52,64 +70,81 @@ class VoiceDiarizer {
 
     // MARK: - Public API
 
-    /// 音声バッファから声の特徴量（MFCC平均ベクトル）を抽出
+    /// 音声バッファから声の特徴量を抽出
     func extractFeatures(from buffer: AVAudioPCMBuffer) -> [Float]? {
         guard let channelData = buffer.floatChannelData?[0] else { return nil }
         let frameCount = Int(buffer.frameLength)
         guard frameCount >= fftSize else { return nil }
 
         let samples = Array(UnsafeBufferPointer(start: channelData, count: frameCount))
-        return extractMFCC(from: samples)
+        return extractFullFeatures(from: samples)
     }
 
     /// 生のFloat配列から特徴量抽出
     func extractFeatures(from samples: [Float]) -> [Float]? {
         guard samples.count >= fftSize else { return nil }
-        return extractMFCC(from: samples)
+        return extractFullFeatures(from: samples)
     }
 
-    /// 話者プロファイルを登録/更新（テキストチャットとの相関で呼ばれる）
+    /// 話者プロファイルを登録/更新
     func enroll(speaker: String, features: [Float]) {
-        guard features.count == numMFCC else { return }
+        guard features.count == featureDimension else { return }
 
         if var existing = profiles[speaker] {
-            // 指数移動平均で更新（新しいサンプルほど重み大）
             let alpha: Float = 2.0 / Float(min(existing.sampleCount + 2, 20))
-            for i in 0..<numMFCC {
-                existing.mfccMean[i] = existing.mfccMean[i] * (1 - alpha) + features[i] * alpha
+            var updated = existing.features
+            for i in 0..<featureDimension {
+                updated[i] = updated[i] * (1 - alpha) + features[i] * alpha
             }
+            existing.features = updated
             existing.sampleCount += 1
             profiles[speaker] = existing
             onLog?("🎤 声紋更新: \(speaker)（サンプル\(existing.sampleCount)）")
         } else {
-            profiles[speaker] = VoiceProfile(name: speaker, mfccMean: features, sampleCount: 1)
+            profiles[speaker] = VoiceProfile(name: speaker, features: features, sampleCount: 1)
             onLog?("🎤 声紋登録: \(speaker)")
         }
+
+        // ピッチ情報をログに表示（デバッグ）
+        let pitchIdx = numMFCC * 3
+        let meanF0 = features[pitchIdx] * (pitchNormMax - pitchNormMin) + pitchNormMin
+        let stdF0 = features[pitchIdx + 1] * (pitchNormMax - pitchNormMin)
+        onLog?("   📊 ピッチ: 平均\(String(format: "%.0f", meanF0))Hz, 標準偏差\(String(format: "%.0f", stdF0))Hz")
 
         saveProfiles()
     }
 
     /// 音声特徴量から最も近い話者を推定
     func identify(features: [Float]) -> (speaker: String, confidence: Float)? {
-        guard features.count == numMFCC else { return nil }
+        guard features.count == featureDimension else { return nil }
         guard !profiles.isEmpty else { return nil }
 
-        var bestMatch: String?
-        var bestSimilarity: Float = -1
+        var results: [(name: String, distance: Float)] = []
 
         for (name, profile) in profiles {
-            let sim = cosineSimilarity(features, profile.mfccMean)
-            if sim > bestSimilarity {
-                bestSimilarity = sim
-                bestMatch = name
-            }
+            let dist = euclideanDistance(features, profile.features)
+            results.append((name, dist))
         }
 
-        guard let match = bestMatch, bestSimilarity >= matchThreshold else {
+        results.sort { $0.distance < $1.distance }
+
+        let scoreStr = results.map { "\($0.name):\(String(format: "%.2f", $0.distance))" }.joined(separator: " ")
+        onLog?("🔍 声紋照合: \(scoreStr)")
+
+        guard let best = results.first, best.distance <= maxDistance else {
             return nil
         }
 
-        return (match, bestSimilarity)
+        if results.count >= 2 {
+            let ratio = results[1].distance / max(best.distance, 0.001)
+            if ratio < marginRatio {
+                onLog?("⚠️ マージン比不足: \(best.name)(\(String(format: "%.2f", best.distance))) vs \(results[1].name)(\(String(format: "%.2f", results[1].distance))) ratio=\(String(format: "%.3f", ratio))")
+                return nil
+            }
+        }
+
+        let confidence = max(0, 1.0 - best.distance / maxDistance)
+        return (best.name, confidence)
     }
 
     /// 登録済みプロファイル一覧
@@ -123,51 +158,149 @@ class VoiceDiarizer {
         saveProfiles()
     }
 
-    // MARK: - MFCC 計算
+    /// 全プロファイルをクリア
+    func clearAllProfiles() {
+        profiles.removeAll()
+        saveProfiles()
+    }
 
-    private func extractMFCC(from samples: [Float]) -> [Float]? {
+    // MARK: - 特徴量抽出（39次元）
+
+    private func extractFullFeatures(from samples: [Float]) -> [Float]? {
         let numFrames = (samples.count - fftSize) / hopSize + 1
         guard numFrames > 0 else { return nil }
 
         var allMFCCs = [[Float]]()
+        var pitchValues = [Float]()
 
         for frameIdx in 0..<numFrames {
             let start = frameIdx * hopSize
             let frame = Array(samples[start..<start + fftSize])
 
-            // 1. ハミング窓を適用
+            // MFCC
             let windowed = applyHammingWindow(frame)
-
-            // 2. FFTでパワースペクトル計算
             guard let powerSpectrum = computePowerSpectrum(windowed) else { continue }
-
-            // 3. メルフィルタバンク適用
             let melEnergies = applyMelFilterBank(powerSpectrum)
-
-            // 4. 対数
             let logMelEnergies = melEnergies.map { logf(max($0, 1e-10)) }
-
-            // 5. DCTでMFCC計算
-            let mfcc = applyDCT(logMelEnergies)
-
+            let mfccFull = applyDCT(logMelEnergies)
+            let mfcc = Array(mfccFull[mfccStart..<numMFCCRaw])
             allMFCCs.append(mfcc)
-        }
 
-        guard !allMFCCs.isEmpty else { return nil }
-
-        // 全フレームの平均MFCC
-        var mean = [Float](repeating: 0, count: numMFCC)
-        for mfcc in allMFCCs {
-            for i in 0..<numMFCC {
-                mean[i] += mfcc[i]
+            // ピッチ推定（自己相関法）
+            if let f0 = estimatePitch(frame) {
+                pitchValues.append(f0)
             }
         }
+
+        guard allMFCCs.count >= 2 else { return nil }
+
         let count = Float(allMFCCs.count)
-        for i in 0..<numMFCC {
-            mean[i] /= count
+
+        // --- MFCC平均（12次元）---
+        var mean = [Float](repeating: 0, count: numMFCC)
+        for mfcc in allMFCCs {
+            for i in 0..<numMFCC { mean[i] += mfcc[i] }
+        }
+        for i in 0..<numMFCC { mean[i] /= count }
+
+        // --- MFCC標準偏差（12次元）---
+        var std = [Float](repeating: 0, count: numMFCC)
+        for mfcc in allMFCCs {
+            for i in 0..<numMFCC {
+                let diff = mfcc[i] - mean[i]
+                std[i] += diff * diff
+            }
+        }
+        for i in 0..<numMFCC { std[i] = sqrtf(std[i] / count) }
+
+        // --- デルタMFCC平均（12次元）---
+        var deltaMean = [Float](repeating: 0, count: numMFCC)
+        for f in 1..<allMFCCs.count {
+            for i in 0..<numMFCC { deltaMean[i] += allMFCCs[f][i] - allMFCCs[f - 1][i] }
+        }
+        let deltaCount = Float(allMFCCs.count - 1)
+        for i in 0..<numMFCC { deltaMean[i] /= deltaCount }
+
+        // --- ピッチ特徴（3次元、0〜1に正規化）---
+        var pitchMean: Float = 0
+        var pitchStd: Float = 0
+        var pitchRange: Float = 0
+
+        if pitchValues.count >= 2 {
+            let pSum = pitchValues.reduce(0, +)
+            pitchMean = pSum / Float(pitchValues.count)
+
+            var pVarSum: Float = 0
+            for p in pitchValues { pVarSum += (p - pitchMean) * (p - pitchMean) }
+            pitchStd = sqrtf(pVarSum / Float(pitchValues.count))
+
+            let pMin = pitchValues.min() ?? 0
+            let pMax = pitchValues.max() ?? 0
+            pitchRange = pMax - pMin
+
+            // 0〜1に正規化
+            pitchMean = (pitchMean - pitchNormMin) / (pitchNormMax - pitchNormMin)
+            pitchStd = pitchStd / (pitchNormMax - pitchNormMin)
+            pitchRange = pitchRange / (pitchNormMax - pitchNormMin)
         }
 
-        return mean
+        // ピッチ特徴にウェイトを掛ける（MFCCとのバランス調整）
+        // ピッチは話者識別で非常に重要なので大きめのウェイト
+        let pitchWeight: Float = 5.0
+        let pitchFeatures = [pitchMean * pitchWeight, pitchStd * pitchWeight, pitchRange * pitchWeight]
+
+        // 39次元 = [mean(12), std(12), deltaMean(12), pitch(3)]
+        return mean + std + deltaMean + pitchFeatures
+    }
+
+    // MARK: - ピッチ推定（自己相関法）
+
+    /// フレームからF0（基本周波数）を推定
+    private func estimatePitch(_ frame: [Float]) -> Float? {
+        let n = frame.count
+
+        // 音量チェック（無音フレームはスキップ）
+        var rms: Float = 0
+        vDSP_rmsqv(frame, 1, &rms, vDSP_Length(n))
+        guard rms > 0.01 else { return nil }
+
+        let minLag = Int(sampleRate / pitchMaxFreq)  // ~110 samples
+        let maxLag = Int(sampleRate / pitchMinFreq)   // ~735 samples
+        guard maxLag < n else { return nil }
+
+        // 自己相関関数を計算
+        var bestLag = 0
+        var bestCorr: Float = -1
+
+        for lag in minLag...maxLag {
+            let length = n - lag
+
+            var corr: Float = 0
+            var n1: Float = 0
+            var n2: Float = 0
+            frame.withUnsafeBufferPointer { buf1 in
+                let ptr1 = buf1.baseAddress!
+                let ptr2 = ptr1.advanced(by: lag)
+                vDSP_dotpr(ptr1, 1, ptr2, 1, &corr, vDSP_Length(length))
+                vDSP_dotpr(ptr1, 1, ptr1, 1, &n1, vDSP_Length(length))
+                vDSP_dotpr(ptr2, 1, ptr2, 1, &n2, vDSP_Length(length))
+            }
+
+            let denom = sqrtf(n1 * n2)
+            guard denom > 0 else { continue }
+            let correlation = corr / denom
+
+            if correlation > bestCorr {
+                bestCorr = correlation
+                bestLag = lag
+            }
+        }
+
+        // 相関が十分高い場合のみピッチとして返す
+        guard bestCorr > 0.3, bestLag > 0 else { return nil }
+
+        let f0 = sampleRate / Float(bestLag)
+        return f0
     }
 
     // MARK: - 信号処理ヘルパー
@@ -189,11 +322,9 @@ class VoiceDiarizer {
 
         guard let setup = fftSetup else { return nil }
 
-        // packed real → split complex
         var realp = [Float](repeating: 0, count: halfN)
         var imagp = [Float](repeating: 0, count: halfN)
 
-        // フレームデータをsplit complexに変換
         frame.withUnsafeBufferPointer { buf in
             buf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfN) { complexPtr in
                 var split = DSPSplitComplex(realp: &realp, imagp: &imagp)
@@ -201,15 +332,12 @@ class VoiceDiarizer {
             }
         }
 
-        // in-place FFT
         var split = DSPSplitComplex(realp: &realp, imagp: &imagp)
         vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
 
-        // パワースペクトル = real^2 + imag^2
         var power = [Float](repeating: 0, count: halfN)
         vDSP_zvmags(&split, 1, &power, 1, vDSP_Length(halfN))
 
-        // 正規化
         var scale = Float(n * n)
         vDSP_vsdiv(power, 1, &scale, &power, 1, vDSP_Length(halfN))
 
@@ -231,14 +359,12 @@ class VoiceDiarizer {
         let melLow = hzToMel(melLowFreq)
         let melHigh = hzToMel(melHighFreq)
 
-        // メル軸上で等間隔のポイント
         var melPoints = [Float]()
         for i in 0...(numMelBands + 1) {
             let mel = melLow + Float(i) * (melHigh - melLow) / Float(numMelBands + 1)
             melPoints.append(mel)
         }
 
-        // Hz → FFT bin インデックス
         let binPoints = melPoints.map { mel -> Int in
             let hz = melToHz(mel)
             return Int(floorf(hz * Float(fftSize) / sampleRate))
@@ -275,7 +401,7 @@ class VoiceDiarizer {
 
     private func buildDCTMatrix() -> [[Float]] {
         var matrix = [[Float]]()
-        for k in 0..<numMFCC {
+        for k in 0..<numMFCCRaw {
             var row = [Float]()
             for n in 0..<numMelBands {
                 let val = cosf(.pi * Float(k) * (Float(n) + 0.5) / Float(numMelBands))
@@ -294,20 +420,16 @@ class VoiceDiarizer {
         }
     }
 
-    // MARK: - 類似度
+    // MARK: - 距離計算
 
-    private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
-        guard a.count == b.count, !a.isEmpty else { return 0 }
-        var dot: Float = 0
-        var normA: Float = 0
-        var normB: Float = 0
-        vDSP_dotpr(a, 1, b, 1, &dot, vDSP_Length(a.count))
-        vDSP_dotpr(a, 1, a, 1, &normA, vDSP_Length(a.count))
-        vDSP_dotpr(b, 1, b, 1, &normB, vDSP_Length(b.count))
-
-        let denom = sqrtf(normA) * sqrtf(normB)
-        guard denom > 0 else { return 0 }
-        return dot / denom
+    private func euclideanDistance(_ a: [Float], _ b: [Float]) -> Float {
+        guard a.count == b.count, !a.isEmpty else { return Float.greatestFiniteMagnitude }
+        var sumSq: Float = 0
+        for i in 0..<a.count {
+            let diff = a[i] - b[i]
+            sumSq += diff * diff
+        }
+        return sqrtf(sumSq)
     }
 
     // MARK: - 永続化
@@ -324,7 +446,8 @@ class VoiceDiarizer {
         for (_, profile) in profiles {
             data.append([
                 "name": profile.name,
-                "mfccMean": profile.mfccMean.map { Double($0) },
+                "features": profile.features.map { Double($0) },
+                "featureDim": profile.features.count,
                 "sampleCount": profile.sampleCount
             ])
         }
@@ -340,13 +463,17 @@ class VoiceDiarizer {
 
         for item in arr {
             guard let name = item["name"] as? String,
-                  let mfcc = item["mfccMean"] as? [Double],
                   let count = item["sampleCount"] as? Int else { continue }
-            profiles[name] = VoiceProfile(
-                name: name,
-                mfccMean: mfcc.map { Float($0) },
-                sampleCount: count
-            )
+
+            if let feats = item["features"] as? [Double], feats.count == featureDimension {
+                profiles[name] = VoiceProfile(
+                    name: name,
+                    features: feats.map { Float($0) },
+                    sampleCount: count
+                )
+            } else {
+                onLog?("⚠️ \(name) の声紋は旧形式のため再登録が必要です")
+            }
         }
         if !profiles.isEmpty {
             onLog?("🎤 声紋プロファイル読み込み: \(profiles.keys.joined(separator: ", "))")

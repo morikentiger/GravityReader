@@ -120,6 +120,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return self?.roomTranscription?.diarizer.registeredSpeakers ?? []
         }
 
+        statusBarController?.onClearAllVoiceProfiles = { [weak self] in
+            self?.roomTranscription?.diarizer.clearAllProfiles()
+            self?.logWindowController?.addEntry("🗑 全声紋プロファイルをクリアしました。再登録してください。")
+        }
+
         // 声紋登録: YUiに喋らせるコールバック（TTS完了通知付き）
         roomTranscription?.onSpeakRequest = { [weak self] text, completion in
             self?.logWindowController?.addEntry("🤖 YUi: \(text)", isYUi: true)
