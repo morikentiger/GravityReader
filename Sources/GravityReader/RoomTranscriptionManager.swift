@@ -570,7 +570,7 @@ class RoomTranscriptionManager {
         }
     }
 
-    /// ユーザーの声紋登録を完了
+    /// ユーザーの声紋登録を完了（品質検査付き: P0-2）
     private func completeEnrollment(for user: String) {
         audioSamplesLock.lock()
         let samples = recentAudioSamples
@@ -579,22 +579,32 @@ class RoomTranscriptionManager {
 
         let seconds = samples.count / 44100
 
-        if samples.count >= 22050,
-           let features = diarizer.extractFeatures(from: samples) {
-            diarizer.enroll(speaker: user, features: features)
+        guard samples.count >= 22050 else {
+            onLog?("❌ \(user)さんの声紋登録失敗（音声が足りません: \(seconds)秒）")
+            onSpeakRequest?("\(user)さん、ごめん、声がうまく拾えなかった。もう一回試してみてくれる？", nil)
+            cleanupEnrollment()
+            return
+        }
+
+        // 品質検査付き enrollment
+        let result = diarizer.enrollWithQualityCheck(speaker: user, samples: samples)
+        if result.success {
             onLog?("✅ \(user)さんの声紋登録完了！（\(seconds)秒分の音声）")
             onSpeakRequest?("\(user)さん、ありがとう！声を覚えたよ！", nil)
         } else {
-            onLog?("❌ \(user)さんの声紋登録失敗（音声が足りません: \(seconds)秒）")
-            onSpeakRequest?("\(user)さん、ごめん、声がうまく拾えなかった。もう一回試してみてくれる？", nil)
+            onLog?("❌ \(user)さんの声紋登録失敗: \(result.message)")
+            onSpeakRequest?("\(user)さん、ごめん、\(result.message)。もう一回試してみてくれる？", nil)
         }
 
+        cleanupEnrollment()
+    }
+
+    private func cleanupEnrollment() {
         enrollingUser = nil
         isEnrolling = false
         enrollTimer?.invalidate()
         enrollTimer = nil
 
-        // 登録のためだけにマイク起動していた場合は停止
         if startedMicForEnrollment {
             startedMicForEnrollment = false
             stopEnrollmentMic()

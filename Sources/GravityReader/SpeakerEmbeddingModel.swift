@@ -1,6 +1,7 @@
 import Foundation
 import CoreML
 import Accelerate
+import AVFoundation
 
 /// ECAPA-TDNN ニューラル話者埋め込みモデルのCoreMLラッパー。
 /// 入力: 44100Hz 音声 → 16kHzリサンプル → 80次元メル特徴量 → CoreML推論 → 192次元埋め込み
@@ -98,14 +99,76 @@ class SpeakerEmbeddingModel {
 
     // MARK: - Resampling (44100 → 16000)
 
+    /// P1-1: AVAudioConverter による高品質リサンプリング（アンチエイリアスフィルタ付き）
+    /// フォールバック: 線形補間
     private func resample(_ samples: [Float], from srcRate: Float, to dstRate: Float) -> [Float] {
         guard srcRate != dstRate else { return samples }
 
+        // AVAudioConverter を試行
+        if let result = resampleWithAVAudio(samples, from: srcRate, to: dstRate) {
+            return result
+        }
+
+        // フォールバック: 線形補間
+        return resampleLinear(samples, from: srcRate, to: dstRate)
+    }
+
+    private func resampleWithAVAudio(_ samples: [Float], from srcRate: Float, to dstRate: Float) -> [Float]? {
+        guard let srcFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Double(srcRate), channels: 1, interleaved: false),
+              let dstFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Double(dstRate), channels: 1, interleaved: false) else {
+            return nil
+        }
+
+        guard let converter = AVAudioConverter(from: srcFormat, to: dstFormat) else {
+            return nil
+        }
+
+        let frameCount = AVAudioFrameCount(samples.count)
+        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount) else {
+            return nil
+        }
+        inputBuffer.frameLength = frameCount
+
+        // 入力バッファにサンプルをコピー
+        if let channelData = inputBuffer.floatChannelData {
+            memcpy(channelData[0], samples, Int(frameCount) * MemoryLayout<Float>.size)
+        }
+
+        let ratio = Double(dstRate) / Double(srcRate)
+        let outputFrameCount = AVAudioFrameCount(Double(samples.count) * ratio)
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: dstFormat, frameCapacity: outputFrameCount + 256) else {
+            return nil
+        }
+
+        var inputConsumed = false
+        let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+            if inputConsumed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            inputConsumed = true
+            outStatus.pointee = .haveData
+            return inputBuffer
+        }
+
+        var error: NSError?
+        let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+
+        guard status != .error, error == nil else {
+            return nil
+        }
+
+        let count = Int(outputBuffer.frameLength)
+        guard count > 0, let channelData = outputBuffer.floatChannelData else { return nil }
+
+        return Array(UnsafeBufferPointer(start: channelData[0], count: count))
+    }
+
+    private func resampleLinear(_ samples: [Float], from srcRate: Float, to dstRate: Float) -> [Float] {
         let ratio = Double(dstRate) / Double(srcRate)
         let outputLength = Int(Double(samples.count) * ratio)
         guard outputLength > 0 else { return [] }
 
-        // vDSP 線形補間によるリサンプリング
         var output = [Float](repeating: 0, count: outputLength)
         for i in 0..<outputLength {
             let srcIdx = Double(i) / ratio

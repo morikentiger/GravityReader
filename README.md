@@ -264,6 +264,17 @@ GRAVITY.app には外部 API がないため、macOS Accessibility API (`AXUIEle
   - Center padding追加（両端200サンプル）でフレーム数を298→301に正確化
   - Hamming窓の適用範囲を512→400サンプルに修正（残りはゼロパディング）
 
+### v12.1 — 声紋識別の観測基盤 & 品質管理強化
+- **構造化診断ログ**: 識別1回ごとにJSONLで詳細イベントを記録（top1/top2/margin/decisionType/unknownReason/adaptiveRejectedReason）
+- **音声品質評価モジュール**: `AudioQualityEvaluator` を新設。RMS・有声率・クリッピング率・有効音声秒数で品質を数値化
+- **登録時品質検査**: 音量不足・無声音過多・クリッピングを検出して登録拒否。埋め込み自己一貫性チェック（3秒窓間の類似度）で複数話者混入を検出
+- **推論前品質ゲート**: 無音・環境音のみの区間では埋め込み生成をスキップし、誤認を削減
+- **高品質リサンプラ**: AVAudioConverter による 44.1kHz→16kHz 変換（アンチエイリアスフィルタ付き）。失敗時は線形補間にフォールバック
+- **Temporal Voting改良**: 単発ノイズでの投票履歴リセットを防止。新話者が2回連続で来た場合のみリセット（hysteresis）
+- **適応学習診断**: 更新却下理由を記録・公開（max_updates_exceeded / low_confidence / drift_guard）
+- **Unknown理由付き**: 不明判定の内訳を分類（insufficient_quality / below_min_similarity / below_margin / vote_not_converged）
+- **プロファイル健全性サマリー**: 各話者のサンプル数・最近接他話者・適応学習残り回数を一覧取得可能に
+
 ## ライセンス
 
 MIT License

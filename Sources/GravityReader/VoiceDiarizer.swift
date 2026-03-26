@@ -26,6 +26,49 @@ class VoiceDiarizer {
         var mode: Mode
     }
 
+    /// 識別の確信度レベル
+    enum IdentifyConfidence {
+        /// 厳格マージンを満たした確定判定（適応学習OK）
+        case strict
+        /// 多数決やソフトマージンによる推定判定（適応学習NG）
+        case estimated
+    }
+
+    /// unknown 判定の理由（P2-1）
+    enum UnknownReason: String, Codable {
+        case insufficientQuality = "insufficient_quality"
+        case belowMinSimilarity = "below_min_similarity"
+        case belowMargin = "below_margin"
+        case voteNotConverged = "vote_not_converged"
+        case modeUnavailable = "mode_unavailable"
+        case noProfiles = "no_profiles"
+        case featureMismatch = "feature_mismatch"
+    }
+
+    /// 構造化デバッグイベント（P0-1）
+    struct IdentificationDebugEvent: Codable {
+        let timestamp: Date
+        let mode: String               // "neural" or "mfcc"
+        let topSpeaker: String?
+        let topSimilarity: Float?
+        let secondSpeaker: String?
+        let secondSimilarity: Float?
+        let margin: Float?
+        let decisionType: String       // "strict", "soft", "unknown", "voted"
+        let recentVotes: [String]
+        let finalDecision: String
+        let unknownReason: String?
+        let adaptiveUpdated: Bool
+        let adaptiveRejectedReason: String?
+        let inputQuality: InputQualityInfo?
+
+        struct InputQualityInfo: Codable {
+            let rms: Float
+            let voicedRatio: Float
+            let effectiveDuration: Float
+        }
+    }
+
     // MARK: - プロパティ
 
     /// 登録済みの声紋プロファイル
@@ -38,29 +81,24 @@ class VoiceDiarizer {
     let embeddingModel = SpeakerEmbeddingModel()
 
     // --- ニューラルモード用パラメータ ---
-    /// コサイン類似度の最低閾値（これ以下は「不明」）
     var minSimilarity: Float = 0.45
-    /// 1位と2位のコサイン類似度差の最低マージン（厳格判定用）
     var similarityMargin: Float = 0.08
-    /// 緩いマージン閾値（多数決補助判定用）— この以上なら候補に入れる
     var softMargin: Float = 0.02
 
     // --- 時間的多数決（temporal voting）---
-    /// 直近N回の識別候補を保持
     private var recentVotes: [(speaker: String, score: Float)] = []
-    /// 多数決に使うウィンドウサイズ
     private let votingWindowSize = 5
-    /// 多数決で採用するのに必要な最低票数
     private let votingMinCount = 3
 
     // --- MFCCモード用パラメータ ---
-    /// ユークリッド距離の最大許容距離（これ以上は「不明」）
     var maxDistance: Float = 30.0
-    /// 1位と2位の最低マージン比（2位の距離 / 1位の距離 がこれ以下なら「不明」）
     var marginRatio: Float = 1.10
 
     /// ログコールバック
     var onLog: ((String) -> Void)?
+
+    /// 構造化診断ログの有効化フラグ
+    var diagnosticsEnabled = true
 
     // MARK: - MFCC パラメータ (フォールバック用)
 
@@ -69,12 +107,11 @@ class VoiceDiarizer {
     private let hopSize: Int = 512
     private let numMelBands: Int = 40
     private let numMFCCRaw: Int = 13
-    private let mfccStart: Int = 1          // C0スキップ
-    private var numMFCC: Int { numMFCCRaw - mfccStart }  // = 12
+    private let mfccStart: Int = 1
+    private var numMFCC: Int { numMFCCRaw - mfccStart }
 
-    // ピッチ推定パラメータ
-    private let pitchMinFreq: Float = 85     // Hz（低い男性の声、60Hzノイズ回避）
-    private let pitchMaxFreq: Float = 400    // Hz（高い女性の声）
+    private let pitchMinFreq: Float = 85
+    private let pitchMaxFreq: Float = 400
     private let pitchNormMin: Float = 85
     private let pitchNormMax: Float = 400
 
@@ -84,18 +121,13 @@ class VoiceDiarizer {
     /// 特徴ベクトルの次元数
     var featureDimension: Int {
         switch mode {
-        case .neural: return SpeakerEmbeddingModel.embeddingDim  // 192
-        case .mfcc:   return numMFCC * 3 + 3                      // 39
+        case .neural: return SpeakerEmbeddingModel.embeddingDim
+        case .mfcc:   return numMFCC * 3 + 3
         }
     }
 
-    /// メルフィルタバンク（初回生成後キャッシュ）
     private lazy var melFilterBank: [[Float]] = buildMelFilterBank()
-
-    /// DCT 行列（初回生成後キャッシュ）
     private lazy var dctMatrix: [[Float]] = buildDCTMatrix()
-
-    /// FFT セットアップ (log2(fftSize))
     private lazy var fftSetup: FFTSetup? = {
         let log2n = vDSP_Length(log2f(Float(fftSize)))
         return vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
@@ -103,14 +135,11 @@ class VoiceDiarizer {
 
     // MARK: - モデル初期化
 
-    /// ニューラルモデルのロードを開始し、完了したらモードを切り替え
     func initializeNeuralModel() {
         embeddingModel.onLog = onLog
         embeddingModel.loadAsync()
 
-        // モデルロード完了を監視
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // 最大10秒待つ
             for _ in 0..<100 {
                 if self?.embeddingModel.isAvailable == true {
                     DispatchQueue.main.async {
@@ -129,7 +158,6 @@ class VoiceDiarizer {
         mode = .neural
         onLog?("🧠 声紋識別: ECAPA-TDNN ニューラルモードに切り替え")
         if hadProfiles {
-            // 既存プロファイルはMFCC 39次元なので使えない
             let names = profiles.keys.joined(separator: ", ")
             profiles.removeAll()
             saveProfiles()
@@ -149,11 +177,20 @@ class VoiceDiarizer {
         return extractFeatures(from: samples)
     }
 
-    /// 生のFloat配列から特徴量抽出
+    /// 生のFloat配列から特徴量抽出（品質ゲート付き: P0-3）
     func extractFeatures(from samples: [Float]) -> [Float]? {
         switch mode {
         case .neural:
-            guard samples.count >= Int(sampleRate * 0.5) else { return nil }  // 最低0.5秒
+            guard samples.count >= Int(sampleRate * 0.5) else { return nil }
+
+            // P0-3: 品質ゲート — 音声品質が不十分ならスキップ
+            let quality = AudioQualityEvaluator.evaluate(samples: samples, sampleRate: sampleRate)
+            if !quality.isSufficientForInference {
+                let reasons = quality.failureReasons.joined(separator: ", ")
+                onLog?("🔇 音声品質不足でスキップ: \(reasons)")
+                return nil
+            }
+
             return embeddingModel.extractEmbedding(from: samples, sampleRate: sampleRate)
         case .mfcc:
             guard samples.count >= fftSize else { return nil }
@@ -161,7 +198,7 @@ class VoiceDiarizer {
         }
     }
 
-    /// 話者プロファイルを登録/更新
+    /// 話者プロファイルを登録/更新（品質検査付き: P0-2）
     func enroll(speaker: String, features: [Float]) {
         guard features.count == featureDimension else { return }
 
@@ -172,7 +209,6 @@ class VoiceDiarizer {
                 updated[i] = updated[i] * (1 - alpha) + features[i] * alpha
             }
 
-            // ニューラルモードでは更新後にL2正規化
             if mode == .neural {
                 updated = l2Normalize(updated)
             }
@@ -186,7 +222,6 @@ class VoiceDiarizer {
             onLog?("🎤 声紋登録: \(speaker)")
         }
 
-        // デバッグログ
         switch mode {
         case .neural:
             onLog?("   📊 ECAPA-TDNN 埋め込み \(featureDimension)次元")
@@ -197,15 +232,60 @@ class VoiceDiarizer {
             onLog?("   📊 ピッチ: 平均\(String(format: "%.0f", meanF0))Hz, 標準偏差\(String(format: "%.0f", stdF0))Hz")
         }
 
+        // 登録後に他プロファイルとの距離を警告
+        if mode == .neural {
+            for (otherName, otherProfile) in profiles where otherName != speaker && otherProfile.mode == .neural {
+                let sim = cosineSimilarity(features, otherProfile.features)
+                if sim > 0.85 {
+                    onLog?("⚠️ 登録警告: \(speaker)と\(otherName)の類似度が\(String(format: "%.3f", sim))で高すぎます")
+                }
+            }
+        }
+
         saveProfiles()
     }
 
-    /// 識別の確信度レベル
-    enum IdentifyConfidence {
-        /// 厳格マージンを満たした確定判定（適応学習OK）
-        case strict
-        /// 多数決やソフトマージンによる推定判定（適応学習NG）
-        case estimated
+    /// 品質検査付き enrollment（P0-2完全版）
+    /// 12秒の生音声から品質チェック → embedding自己一貫性チェック → enroll
+    func enrollWithQualityCheck(speaker: String, samples: [Float]) -> (success: Bool, message: String) {
+        // Step 1: 基本品質チェック
+        let quality = AudioQualityEvaluator.evaluate(samples: samples, sampleRate: sampleRate)
+        if !quality.isSufficientForEnrollment {
+            let reasons = quality.enrollmentFailureReasons.joined(separator: "\n")
+            onLog?("❌ 登録品質不足: \(speaker)\n\(reasons)")
+            return (false, "登録品質が不十分です:\n\(reasons)")
+        }
+
+        onLog?("📊 登録品質: RMS=\(String(format: "%.4f", quality.averageRMS)) 有声率=\(String(format: "%.0f%%", quality.voicedRatio * 100)) 有効\(String(format: "%.1f", quality.effectiveDuration))秒")
+
+        // Step 2: embedding 自己一貫性チェック（ニューラルモード時）
+        if mode == .neural {
+            if let consistency = AudioQualityEvaluator.evaluateEmbeddingConsistency(
+                samples: samples,
+                sampleRate: sampleRate,
+                extractEmbedding: { [weak self] window in
+                    self?.embeddingModel.extractEmbedding(from: window, sampleRate: self?.sampleRate ?? 44100)
+                }
+            ) {
+                onLog?("📊 埋め込み一貫性: 平均=\(String(format: "%.3f", consistency.meanSimilarity)) 最小=\(String(format: "%.3f", consistency.minSimilarity)) (\(consistency.windowCount)窓)")
+
+                if consistency.meanSimilarity < 0.75 {
+                    onLog?("⚠️ 登録品質警告: 埋め込みの一貫性が低い（複数話者混入の疑い）")
+                    return (false, "録音の一貫性が低く、登録品質が不安定です（平均類似度: \(String(format: "%.2f", consistency.meanSimilarity))）")
+                }
+                if consistency.minSimilarity < 0.50 {
+                    onLog?("⚠️ 登録品質警告: 一部区間の埋め込みが大きく乖離")
+                }
+            }
+        }
+
+        // Step 3: 特徴量抽出 & 登録
+        guard let features = embeddingModel.extractEmbedding(from: samples, sampleRate: sampleRate) else {
+            return (false, "特徴量の抽出に失敗しました")
+        }
+
+        enroll(speaker: speaker, features: features)
+        return (true, "登録完了！品質: RMS=\(String(format: "%.3f", quality.averageRMS)) 有声率=\(String(format: "%.0f%%", quality.voicedRatio * 100))")
     }
 
     /// 音声特徴量から最も近い話者を推定
@@ -235,39 +315,41 @@ class VoiceDiarizer {
         return (r.result.speaker, r.result.confidence, r.level)
     }
 
-    // MARK: - 適応学習（高確信度で自動更新）
+    // MARK: - 適応学習
 
-    /// 識別結果が高確信度の場合、プロファイルを自動で微更新する
-    /// 環境変化（マイク位置、部屋の反響等）に徐々に適応する
-    /// 適応学習の最大更新回数（ドリフト防止）
     private let maxAdaptiveUpdates = 100
 
+    /// 最後の適応学習診断情報（P1-3）
+    private(set) var lastAdaptiveRejectedReason: String?
+
     func adaptiveUpdate(speaker: String, features: [Float]) {
+        lastAdaptiveRejectedReason = nil
         guard features.count == featureDimension else { return }
         guard var profile = profiles[speaker] else { return }
         guard profile.mode == mode else { return }
 
-        // 適応学習回数の上限チェック（過度なドリフト防止）
-        // sampleCount には初回登録分も含まれるので、登録時のサンプル数を超えた分が適応学習回数
+        // 適応学習回数の上限チェック
         if profile.sampleCount > maxAdaptiveUpdates {
-            return  // これ以上は更新しない
+            lastAdaptiveRejectedReason = "max_updates_exceeded"
+            return
         }
 
-        // 確信度チェック：ニューラルなら高コサイン類似度、MFCCなら近距離
+        // 確信度チェック
         let shouldUpdate: Bool
         switch mode {
         case .neural:
             let sim = cosineSimilarity(features, profile.features)
-            shouldUpdate = sim >= 0.65  // 高確信度のみ（識別閾値0.45よりかなり厳しい）
+            shouldUpdate = sim >= 0.65
+            if !shouldUpdate { lastAdaptiveRejectedReason = "low_confidence(\(String(format: "%.3f", sim)))" }
         case .mfcc:
             let dist = euclideanDistance(features, profile.features)
-            shouldUpdate = dist <= maxDistance * 0.4  // 距離が閾値の40%以下
+            shouldUpdate = dist <= maxDistance * 0.4
+            if !shouldUpdate { lastAdaptiveRejectedReason = "low_confidence" }
         }
 
         guard shouldUpdate else { return }
 
-        // ゆっくり更新（alpha小さめ → 急激な変化を避ける）
-        let alpha: Float = 0.05  // 5%ずつ更新
+        let alpha: Float = 0.05
         var updated = profile.features
         for i in 0..<featureDimension {
             updated[i] = updated[i] * (1 - alpha) + features[i] * alpha
@@ -277,12 +359,12 @@ class VoiceDiarizer {
             updated = l2Normalize(updated)
         }
 
-        // ドリフトガード: 更新後に他プロファイルとの距離が近づきすぎないかチェック
+        // ドリフトガード
         if mode == .neural {
             for (otherName, otherProfile) in profiles where otherName != speaker && otherProfile.mode == .neural {
                 let simAfter = cosineSimilarity(updated, otherProfile.features)
                 if simAfter > 0.92 {
-                    // 更新すると他プロファイルに近づきすぎる → 却下
+                    lastAdaptiveRejectedReason = "drift_guard(\(otherName):\(String(format: "%.3f", simAfter)))"
                     onLog?("🛑 ドリフトガード: \(speaker)の更新却下（\(otherName)との類似度が\(String(format: "%.3f", simAfter))に接近）")
                     return
                 }
@@ -293,14 +375,14 @@ class VoiceDiarizer {
         profile.sampleCount += 1
         profiles[speaker] = profile
 
-        // 50回ごとにログ & 保存（毎回はやらない）
         if profile.sampleCount % 50 == 0 {
             onLog?("🔄 声紋適応更新: \(speaker)（累計\(profile.sampleCount)サンプル）")
             saveProfiles()
         }
     }
 
-    // --- ニューラルモード: コサイン類似度 ---
+    // MARK: - ニューラル識別（構造化ログ付き）
+
     private func identifyNeural(features: [Float]) -> (result: (speaker: String, confidence: Float), level: IdentifyConfidence)? {
         var results: [(name: String, similarity: Float)] = []
 
@@ -316,59 +398,106 @@ class VoiceDiarizer {
         let scoreStr = results.map { "\($0.name):\(String(format: "%.3f", $0.similarity))" }.joined(separator: " ")
         onLog?("🔍 声紋照合(neural): \(scoreStr)")
 
-        guard let best = results.first, best.similarity >= minSimilarity else {
-            // 全員低すぎ → 多数決にも入れない
+        let best = results[0]
+        let second: (name: String, similarity: Float)? = results.count >= 2 ? results[1] : nil
+        let margin = second != nil ? best.similarity - second!.similarity : Float(1.0)
+
+        // --- 判定ロジック ---
+        var decisionType: String
+        var finalDecision: String
+        var unknownReason: UnknownReason? = nil
+        var returnValue: (result: (speaker: String, confidence: Float), level: IdentifyConfidence)? = nil
+
+        if best.similarity < minSimilarity {
+            // 全員低すぎ
+            decisionType = "unknown"
+            finalDecision = "不明"
+            unknownReason = .belowMinSimilarity
             addVote(speaker: "不明", score: 0)
-            return nil
-        }
-
-        // 登録者が1人だけの場合 → マージン不要
-        if results.count <= 1 {
+        } else if results.count <= 1 || margin >= similarityMargin {
+            // 厳格マージン OK or 1人のみ
+            decisionType = "strict"
+            finalDecision = best.name
             addVote(speaker: best.name, score: best.similarity)
-            return ((best.name, best.similarity), .strict)
-        }
-
-        let margin = best.similarity - results[1].similarity
-
-        // 厳格マージンを満たす → 確定（適応学習OK）
-        if margin >= similarityMargin {
+            returnValue = ((best.name, best.similarity), .strict)
+        } else if margin >= softMargin {
+            // ソフトマージン → 多数決候補
+            decisionType = "soft"
             addVote(speaker: best.name, score: best.similarity)
-            return ((best.name, best.similarity), .strict)
-        }
+            onLog?("⚠️ マージン不足: \(best.name)(\(String(format: "%.3f", best.similarity))) vs \(second!.name)(\(String(format: "%.3f", second!.similarity))) margin=\(String(format: "%.3f", margin))")
 
-        // ソフトマージンを満たす → 多数決に投票（適応学習はしない）
-        if margin >= softMargin {
-            addVote(speaker: best.name, score: best.similarity)
+            if let voted = resolveByVoting() {
+                decisionType = "voted"
+                finalDecision = voted.speaker
+                onLog?("🗳 多数決で判定: \(voted.speaker)（\(voted.count)/\(votingWindowSize)票）")
+                returnValue = ((voted.speaker, best.similarity), .estimated)
+            } else {
+                finalDecision = "不明"
+                unknownReason = .voteNotConverged
+            }
         } else {
-            // マージンが極めて小さい → 不明として投票
+            // マージンが極めて小さい
+            decisionType = "unknown"
+            finalDecision = "不明"
+            unknownReason = .belowMargin
             addVote(speaker: "不明", score: 0)
+            onLog?("⚠️ マージン不足: \(best.name)(\(String(format: "%.3f", best.similarity))) vs \(second!.name)(\(String(format: "%.3f", second!.similarity))) margin=\(String(format: "%.3f", margin))")
         }
 
-        onLog?("⚠️ マージン不足: \(best.name)(\(String(format: "%.3f", best.similarity))) vs \(results[1].name)(\(String(format: "%.3f", results[1].similarity))) margin=\(String(format: "%.3f", margin))")
-
-        // 多数決で判定を試みる
-        if let voted = resolveByVoting() {
-            onLog?("🗳 多数決で判定: \(voted.speaker)（\(voted.count)/\(votingWindowSize)票）")
-            return ((voted.speaker, best.similarity), .estimated)
+        // --- 構造化ログ出力（P0-1）---
+        if diagnosticsEnabled {
+            let event = IdentificationDebugEvent(
+                timestamp: Date(),
+                mode: "neural",
+                topSpeaker: best.name,
+                topSimilarity: best.similarity,
+                secondSpeaker: second?.name,
+                secondSimilarity: second?.similarity,
+                margin: margin,
+                decisionType: decisionType,
+                recentVotes: recentVotes.map { $0.speaker },
+                finalDecision: finalDecision,
+                unknownReason: unknownReason?.rawValue,
+                adaptiveUpdated: false,  // 呼び出し側で設定
+                adaptiveRejectedReason: nil,
+                inputQuality: nil
+            )
+            writeDiagnosticEvent(event)
         }
 
-        return nil
+        return returnValue
     }
 
-    // MARK: - Temporal Voting
+    // MARK: - Temporal Voting（P1-2改良版）
 
-    /// 直前の1位話者を追跡（話者変更検出用）
+    /// 直前の1位話者を追跡
     private var lastTopSpeaker: String = ""
+    /// 話者切替候補カウンター（P1-2: 2回連続で確認してからリセット）
+    private var switchCandidateCount = 0
+    private var switchCandidateSpeaker: String = ""
 
     private func addVote(speaker: String, score: Float) {
-        // 話者が切り替わった兆候を検出：
-        // 前回まで別の人が1位だったのに、今回違う人が来た → 投票履歴をクリア
-        // これにより、もりけんの古い票がぴうセポネの判定を邪魔しなくなる
+        // P1-2改良: 即座にリセットせず、2回連続で新しい話者が来たらリセット
         if speaker != "不明" && speaker != lastTopSpeaker && !lastTopSpeaker.isEmpty {
-            recentVotes.removeAll()
-            lastTopSpeaker = speaker
+            if speaker == switchCandidateSpeaker {
+                switchCandidateCount += 1
+            } else {
+                switchCandidateSpeaker = speaker
+                switchCandidateCount = 1
+            }
+
+            // 2回連続で異なる話者 → 本当の話者交代と判定してリセット
+            if switchCandidateCount >= 2 {
+                recentVotes.removeAll()
+                lastTopSpeaker = speaker
+                switchCandidateCount = 0
+                switchCandidateSpeaker = ""
+                onLog?("🔄 話者交代検出: → \(speaker)")
+            }
         } else if speaker != "不明" {
             lastTopSpeaker = speaker
+            switchCandidateCount = 0
+            switchCandidateSpeaker = ""
         }
 
         recentVotes.append((speaker: speaker, score: score))
@@ -377,7 +506,6 @@ class VoiceDiarizer {
         }
     }
 
-    /// 直近の投票から多数派の話者を返す（「不明」以外で最低 votingMinCount 票必要）
     private func resolveByVoting() -> (speaker: String, count: Int)? {
         guard recentVotes.count >= votingMinCount else { return nil }
 
@@ -394,15 +522,16 @@ class VoiceDiarizer {
         return (speaker: winner.key, count: winner.value)
     }
 
-    /// 声紋登録変更時に投票履歴をクリア
     func clearVotingHistory() {
         recentVotes.removeAll()
+        lastTopSpeaker = ""
+        switchCandidateCount = 0
+        switchCandidateSpeaker = ""
     }
 
-    // MARK: - プロファイル診断
+    // MARK: - プロファイル診断（P1-4: 任意タイミングで実行可能）
 
     /// 登録済みプロファイル間のコサイン類似度を診断ログに出力
-    /// プロファイルが近づきすぎていないかチェック
     func diagnoseProfiles() {
         guard mode == .neural else { return }
         let names = Array(profiles.keys).sorted()
@@ -427,13 +556,33 @@ class VoiceDiarizer {
                 onLog?("   \(names[i]) ↔ \(names[j]): \(String(format: "%.4f", sim)) \(status)")
             }
             if let p = profiles[names[i]] {
-                onLog?("   \(names[i]): サンプル数=\(p.sampleCount)")
+                onLog?("   \(names[i]): サンプル数=\(p.sampleCount), 適応学習残り=\(max(0, maxAdaptiveUpdates - p.sampleCount))回")
             }
         }
         onLog?("📊 ========================")
     }
 
-    // --- MFCCモード: ユークリッド距離 ---
+    /// プロファイルの健全性サマリーを返す（UIに表示用）
+    func profileHealthSummary() -> [(speaker: String, sampleCount: Int, nearestOther: String?, nearestSimilarity: Float?)] {
+        var summary: [(speaker: String, sampleCount: Int, nearestOther: String?, nearestSimilarity: Float?)] = []
+        for (name, profile) in profiles {
+            var nearest: (String, Float)? = nil
+            for (otherName, otherProfile) in profiles where otherName != name {
+                let sim = mode == .neural
+                    ? cosineSimilarity(profile.features, otherProfile.features)
+                    : 1.0 / (1.0 + euclideanDistance(profile.features, otherProfile.features))
+                if nearest == nil || sim > nearest!.1 {
+                    nearest = (otherName, sim)
+                }
+            }
+            summary.append((speaker: name, sampleCount: profile.sampleCount,
+                            nearestOther: nearest?.0, nearestSimilarity: nearest?.1))
+        }
+        return summary.sorted { $0.speaker < $1.speaker }
+    }
+
+    // MARK: - MFCCモード識別
+
     private func identifyMFCC(features: [Float]) -> (speaker: String, confidence: Float)? {
         var results: [(name: String, distance: Float)] = []
 
@@ -463,25 +612,54 @@ class VoiceDiarizer {
         return (best.name, confidence)
     }
 
-    /// 登録済みプロファイル一覧
+    // MARK: - プロファイル管理
+
     var registeredSpeakers: [String] {
         Array(profiles.keys)
     }
 
-    /// プロファイルをクリア
     func clearProfile(for speaker: String) {
         profiles.removeValue(forKey: speaker)
         saveProfiles()
     }
 
-    /// 全プロファイルをクリア
     func clearAllProfiles() {
         profiles.removeAll()
         clearVotingHistory()
         saveProfiles()
     }
 
-    // MARK: - 特徴量抽出（39次元）
+    // MARK: - 構造化診断ログ出力（P0-1: JSONL）
+
+    private lazy var diagnosticsURL: URL = {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appendingPathComponent("GravityReader/diagnostics")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("identify.jsonl")
+    }()
+
+    private let diagnosticsEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
+
+    private func writeDiagnosticEvent(_ event: IdentificationDebugEvent) {
+        guard diagnosticsEnabled else { return }
+        guard let data = try? diagnosticsEncoder.encode(event),
+              let line = String(data: data, encoding: .utf8) else { return }
+
+        let lineWithNewline = line + "\n"
+        if let handle = try? FileHandle(forWritingTo: diagnosticsURL) {
+            handle.seekToEndOfFile()
+            handle.write(lineWithNewline.data(using: .utf8)!)
+            handle.closeFile()
+        } else {
+            try? lineWithNewline.write(to: diagnosticsURL, atomically: true, encoding: .utf8)
+        }
+    }
+
+    // MARK: - 特徴量抽出（MFCC 39次元）— フォールバック用
 
     private func extractFullFeatures(from samples: [Float]) -> [Float]? {
         let numFrames = (samples.count - fftSize) / hopSize + 1
@@ -494,7 +672,6 @@ class VoiceDiarizer {
             let start = frameIdx * hopSize
             let frame = Array(samples[start..<start + fftSize])
 
-            // MFCC
             let windowed = applyHammingWindow(frame)
             guard let powerSpectrum = computePowerSpectrum(windowed) else { continue }
             let melEnergies = applyMelFilterBank(powerSpectrum)
@@ -503,7 +680,6 @@ class VoiceDiarizer {
             let mfcc = Array(mfccFull[mfccStart..<numMFCCRaw])
             allMFCCs.append(mfcc)
 
-            // ピッチ推定（自己相関法）
             if let f0 = estimatePitch(frame) {
                 pitchValues.append(f0)
             }
@@ -513,14 +689,12 @@ class VoiceDiarizer {
 
         let count = Float(allMFCCs.count)
 
-        // --- MFCC平均（12次元）---
         var mean = [Float](repeating: 0, count: numMFCC)
         for mfcc in allMFCCs {
             for i in 0..<numMFCC { mean[i] += mfcc[i] }
         }
         for i in 0..<numMFCC { mean[i] /= count }
 
-        // --- MFCC標準偏差（12次元）---
         var std = [Float](repeating: 0, count: numMFCC)
         for mfcc in allMFCCs {
             for i in 0..<numMFCC {
@@ -530,7 +704,6 @@ class VoiceDiarizer {
         }
         for i in 0..<numMFCC { std[i] = sqrtf(std[i] / count) }
 
-        // --- デルタMFCC平均（12次元）---
         var deltaMean = [Float](repeating: 0, count: numMFCC)
         for f in 1..<allMFCCs.count {
             for i in 0..<numMFCC { deltaMean[i] += allMFCCs[f][i] - allMFCCs[f - 1][i] }
@@ -538,7 +711,6 @@ class VoiceDiarizer {
         let deltaCount = Float(allMFCCs.count - 1)
         for i in 0..<numMFCC { deltaMean[i] /= deltaCount }
 
-        // --- ピッチ特徴（3次元、0〜1に正規化）---
         var pitchMean: Float = 0
         var pitchStd: Float = 0
         var pitchRange: Float = 0
@@ -555,37 +727,30 @@ class VoiceDiarizer {
             let pMax = pitchValues.max() ?? 0
             pitchRange = pMax - pMin
 
-            // 0〜1に正規化
             pitchMean = (pitchMean - pitchNormMin) / (pitchNormMax - pitchNormMin)
             pitchStd = pitchStd / (pitchNormMax - pitchNormMin)
             pitchRange = pitchRange / (pitchNormMax - pitchNormMin)
         }
 
-        // ピッチ特徴にウェイトを掛ける（MFCCとのバランス調整）
-        // ピッチは話者識別で非常に重要なので大きめのウェイト
         let pitchWeight: Float = 5.0
         let pitchFeatures = [pitchMean * pitchWeight, pitchStd * pitchWeight, pitchRange * pitchWeight]
 
-        // 39次元 = [mean(12), std(12), deltaMean(12), pitch(3)]
         return mean + std + deltaMean + pitchFeatures
     }
 
     // MARK: - ピッチ推定（自己相関法）
 
-    /// フレームからF0（基本周波数）を推定
     private func estimatePitch(_ frame: [Float]) -> Float? {
         let n = frame.count
 
-        // 音量チェック（無音フレームはスキップ）
         var rms: Float = 0
         vDSP_rmsqv(frame, 1, &rms, vDSP_Length(n))
         guard rms > 0.01 else { return nil }
 
-        let minLag = Int(sampleRate / pitchMaxFreq)  // ~110 samples
-        let maxLag = Int(sampleRate / pitchMinFreq)   // ~735 samples
+        let minLag = Int(sampleRate / pitchMaxFreq)
+        let maxLag = Int(sampleRate / pitchMinFreq)
         guard maxLag < n else { return nil }
 
-        // 自己相関関数を計算
         var bestLag = 0
         var bestCorr: Float = -1
 
@@ -613,7 +778,6 @@ class VoiceDiarizer {
             }
         }
 
-        // 相関が十分高い場合のみピッチとして返す
         guard bestCorr > 0.3, bestLag > 0 else { return nil }
 
         let f0 = sampleRate / Float(bestLag)
@@ -739,7 +903,6 @@ class VoiceDiarizer {
 
     // MARK: - 距離・類似度計算
 
-    /// コサイン類似度（ニューラルモード用、L2正規化済みベクトル同士なら内積と同値）
     private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
         guard a.count == b.count, !a.isEmpty else { return 0 }
         var dot: Float = 0
@@ -747,7 +910,6 @@ class VoiceDiarizer {
         return dot
     }
 
-    /// L2正規化
     private func l2Normalize(_ vec: [Float]) -> [Float] {
         var norm: Float = 0
         vDSP_svesq(vec, 1, &norm, vDSP_Length(vec.count))
@@ -759,7 +921,6 @@ class VoiceDiarizer {
         return result
     }
 
-    /// ユークリッド距離（MFCCモード用）
     private func euclideanDistance(_ a: [Float], _ b: [Float]) -> Float {
         guard a.count == b.count, !a.isEmpty else { return Float.greatestFiniteMagnitude }
         var sumSq: Float = 0
@@ -823,11 +984,9 @@ class VoiceDiarizer {
         }
     }
 
-    /// 適応学習による蓄積をリセットし、プロファイルのsampleCountを初期状態に戻す
-    /// プロファイル自体は維持（再登録は不要だが、次回登録で上書き推奨）
     func resetAdaptiveLearning(for speaker: String) {
         guard var profile = profiles[speaker] else { return }
-        profile.sampleCount = 1  // 初期登録状態に戻す
+        profile.sampleCount = 1
         profiles[speaker] = profile
         saveProfiles()
         onLog?("🔄 \(speaker)の適応学習カウンターをリセット")
