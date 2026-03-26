@@ -96,13 +96,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController?.onToggle = { [weak self] isRunning in
             if isRunning {
                 self?.captureManager?.start()
-                self?.yuiManager?.startIdleMonitoring()
+                if self?.statusBarController?.isYUiEnabled == true {
+                    self?.yuiManager?.startIdleMonitoring()
+                }
                 self?.roomTranscription?.start()
             } else {
                 self?.captureManager?.stop()
                 self?.yuiManager?.stopIdleMonitoring()
                 self?.roomTranscription?.stop()
             }
+        }
+
+        // 読み上げオン/オフ
+        statusBarController?.onTTSToggle = { [weak self] enabled in
+            self?.captureManager?.isTTSEnabled = enabled
+            let msg = enabled ? "🔊 読み上げを有効にしました" : "🔇 読み上げを無効にしました"
+            self?.logWindowController?.addEntry(msg)
+        }
+
+        // YUiコメントオン/オフ
+        statusBarController?.onYUiToggle = { [weak self] enabled in
+            self?.yuiManager?.isEnabled = enabled
+            if enabled {
+                self?.yuiManager?.startIdleMonitoring()
+            } else {
+                self?.yuiManager?.stopIdleMonitoring()
+            }
+            let msg = enabled ? "💬 YUiコメントを有効にしました" : "🙊 YUiコメントを無効にしました"
+            self?.logWindowController?.addEntry(msg)
         }
 
         statusBarController?.onTest = { [weak self] in

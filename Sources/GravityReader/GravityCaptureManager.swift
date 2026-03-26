@@ -27,6 +27,9 @@ class GravityCaptureManager {
     /// ユーザー一覧が更新されたときのコールバック
     var onUsersUpdated: (([String]) -> Void)?
 
+    /// 読み上げオン/オフ（OFFでもキャプチャ・ログ・YUiへの送信は行う）
+    var isTTSEnabled = true
+
     /// 現在の音声ルーム参加者
     private(set) var currentParticipants: [String] = []
 
@@ -555,13 +558,17 @@ class GravityCaptureManager {
             if let user = lastDetectedUser {
                 logWindow?.addEntry("[\(user)] \(text)")
                 if !enrolling {
-                    speechManager.speak(text, forUser: user)
+                    if isTTSEnabled {
+                        speechManager.speak(text, forUser: user)
+                    }
                     yuiManager?.feedMessage("\(user): \(text)")
                 }
             } else {
                 logWindow?.addEntry(text)
                 if !enrolling {
-                    speechManager.speak(text)
+                    if isTTSEnabled {
+                        speechManager.speak(text)
+                    }
                     yuiManager?.feedMessage(text)
                 }
             }

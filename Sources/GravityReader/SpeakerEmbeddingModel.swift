@@ -129,26 +129,26 @@ class SpeakerEmbeddingModel {
     // MARK: - Mel Spectrogram (SpeechBrain互換)
 
     private func computeMelFeatures(_ samples: [Float]) -> [Float]? {
-        let numFrames = (samples.count - windowSamples) / hopSamples + 1
+        // ★ SpeechBrain互換: center=True, pad_mode='constant'
+        // 信号の両端に n_fft//2 = 200 サンプルのゼロを追加
+        let padSize = windowSamples / 2  // 200
+        let padded = [Float](repeating: 0, count: padSize) + samples + [Float](repeating: 0, count: padSize)
+
+        let numFrames = (padded.count - windowSamples) / hopSamples + 1
         guard numFrames > 0 else { return nil }
 
-        // 実際のフレーム数がモデル期待値と一致するか確認
         let targetFrames = SpeakerEmbeddingModel.featTimeDim
 
         var allFrameFeatures = [[Float]]()
 
         for frameIdx in 0..<numFrames {
             let start = frameIdx * hopSamples
-            let end = min(start + windowSamples, samples.count)
-            var frame = Array(samples[start..<end])
+            let end = min(start + windowSamples, padded.count)
+            let frame = Array(padded[start..<end])
 
-            // 窓長に満たない場合はゼロパディング
-            if frame.count < fftSize {
-                frame += [Float](repeating: 0, count: fftSize - frame.count)
-            }
-
-            // ハミング窓
-            let windowed = applyHammingWindow(frame)
+            // ★ ハミング窓は windowSamples (400) にのみ適用し、
+            //   FFT用に fftSize (512) までゼロパディング
+            let windowed = applyHammingWindowAndPad(frame)
 
             // パワースペクトル
             guard let power = computePowerSpectrum(windowed) else { continue }
@@ -219,12 +219,15 @@ class SpeakerEmbeddingModel {
 
     // MARK: - Signal Processing
 
-    private func applyHammingWindow(_ frame: [Float]) -> [Float] {
-        var result = frame
-        let n = Float(frame.count)
-        for i in 0..<frame.count {
+    /// ★ ハミング窓を windowSamples (400) にのみ適用し、fftSize (512) にゼロパディング
+    /// SpeechBrain: win_length=400, n_fft=400 だが、vDSPは2のべき乗が必要なので512にパディング
+    private func applyHammingWindowAndPad(_ frame: [Float]) -> [Float] {
+        var result = [Float](repeating: 0, count: fftSize)  // 512: 残りは0
+        let winLen = min(frame.count, windowSamples)  // 400
+        let n = Float(windowSamples)
+        for i in 0..<winLen {
             let w = 0.54 - 0.46 * cosf(2 * .pi * Float(i) / (n - 1))
-            result[i] *= w
+            result[i] = frame[i] * w
         }
         return result
     }

@@ -18,6 +18,9 @@ enum YUiFrequency: String, CaseIterable {
 class YUiManager {
     // MARK: - 設定
 
+    /// YUiコメント機能のオン/オフ（OFFでもメッセージは蓄積しない・応答も生成しない）
+    var isEnabled = true
+
     var frequency: YUiFrequency = .high {
         didSet { UserDefaults.standard.set(frequency.rawValue, forKey: "YUiFrequency") }
     }
@@ -644,6 +647,8 @@ class YUiManager {
     // MARK: - メッセージ受信
 
     func feedMessage(_ text: String) {
+        // YUiコメント無効時はスキップ
+        guard isEnabled else { return }
         // 声紋登録中は完全スキップ（応答・相槌・タイマーすべて止める）
         if isSpeakingChecker?() == true { return }
 

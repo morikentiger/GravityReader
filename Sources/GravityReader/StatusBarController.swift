@@ -31,6 +31,13 @@ class StatusBarController {
     var onClearAllVoiceProfiles: (() -> Void)?  // 全声紋クリア
     var onShowPreferences: (() -> Void)?
     var onCatchUp: (() -> Void)?
+    var onTTSToggle: ((Bool) -> Void)?      // 読み上げオン/オフ
+    var onYUiToggle: ((Bool) -> Void)?       // YUiコメントオン/オフ
+
+    private(set) var isTTSEnabled = true
+    private(set) var isYUiEnabled = true
+    private var ttsToggleMenuItem: NSMenuItem!
+    private var yuiToggleMenuItem: NSMenuItem!
 
     private var voiceSubmenu: NSMenu!
     private var voiceMenuItem: NSMenuItem!
@@ -62,9 +69,18 @@ class StatusBarController {
 
         menu.addItem(.separator())
 
-        toggleMenuItem = NSMenuItem(title: "▶ 読み上げ開始", action: #selector(toggleReading), keyEquivalent: "")
+        toggleMenuItem = NSMenuItem(title: "▶ 開始", action: #selector(toggleReading), keyEquivalent: "")
         toggleMenuItem.target = self
         menu.addItem(toggleMenuItem)
+
+        // 読み上げ / YUiコメント 独立トグル
+        ttsToggleMenuItem = NSMenuItem(title: "🔊 読み上げ: ON", action: #selector(toggleTTS), keyEquivalent: "")
+        ttsToggleMenuItem.target = self
+        menu.addItem(ttsToggleMenuItem)
+
+        yuiToggleMenuItem = NSMenuItem(title: "💬 YUiコメント: ON", action: #selector(toggleYUi), keyEquivalent: "")
+        yuiToggleMenuItem.target = self
+        menu.addItem(yuiToggleMenuItem)
 
         menu.addItem(.separator())
 
@@ -319,15 +335,36 @@ class StatusBarController {
     @objc private func toggleReading() {
         isRunning.toggle()
         if isRunning {
-            toggleMenuItem.title = "⏹ 読み上げ停止"
-            statusMenuItem.title = "動作中 🔊"
-            statusItem.button?.title = "📖🔊"
+            toggleMenuItem.title = "⏹ 停止"
+            updateStatusDisplay()
         } else {
-            toggleMenuItem.title = "▶ 読み上げ開始"
+            toggleMenuItem.title = "▶ 開始"
             statusMenuItem.title = "停止中"
             statusItem.button?.title = "📖"
         }
         onToggle?(isRunning)
+    }
+
+    @objc private func toggleTTS() {
+        isTTSEnabled.toggle()
+        ttsToggleMenuItem.title = isTTSEnabled ? "🔊 読み上げ: ON" : "🔇 読み上げ: OFF"
+        updateStatusDisplay()
+        onTTSToggle?(isTTSEnabled)
+    }
+
+    @objc private func toggleYUi() {
+        isYUiEnabled.toggle()
+        yuiToggleMenuItem.title = isYUiEnabled ? "💬 YUiコメント: ON" : "🙊 YUiコメント: OFF"
+        updateStatusDisplay()
+        onYUiToggle?(isYUiEnabled)
+    }
+
+    private func updateStatusDisplay() {
+        guard isRunning else { return }
+        let ttsIcon = isTTSEnabled ? "🔊" : "🔇"
+        let yuiIcon = isYUiEnabled ? "💬" : ""
+        statusMenuItem.title = "動作中 \(ttsIcon)\(yuiIcon)"
+        statusItem.button?.title = "📖\(ttsIcon)"
     }
 
     // MARK: - Frequency selection
