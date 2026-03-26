@@ -105,7 +105,8 @@ GravityReader
 ├── GravityCaptureManager.swift     # Accessibility API で GRAVITY からテキスト取得
 ├── SpeechManager.swift             # VOICEVOX / AVSpeechSynthesizer によるキュー付き TTS
 ├── RoomTranscriptionManager.swift  # ルーム音声の常時リスニング・リアルタイム文字起こし
-├── VoiceDiarizer.swift             # MFCC+ピッチ声紋識別（39次元特徴量・ユークリッド距離）
+├── VoiceDiarizer.swift             # 声紋識別（ECAPA-TDNN 192次元 / MFCC 39次元フォールバック）
+├── SpeakerEmbeddingModel.swift    # ECAPA-TDNN CoreML ラッパー（16kHzリサンプル・メル特徴量・推論）
 ├── VoiceTranscriptionManager.swift # Push-to-Talk 音声文字起こし
 └── YUiManager.swift                # AI パートナー（好感度・記憶・孤独感・相槌）
 ```
@@ -215,6 +216,15 @@ GRAVITY.app には外部 API がないため、macOS Accessibility API (`AXUIEle
 - **RMS閾値フィルタ**: 登録時のマイクが無音・ノイズのみを拾う問題を修正、有声区間のみ蓄積
 - **自動声紋登録の廃止**: チャット相関による自動学習を完全撤廃（混合音声で全員同じプロファイルになる問題）
 - **発話分割の修正**: 無音検出の猶予を0.3→0.8秒、確定タイマーを0.8→2.5秒に延長。一つの発話が複数に分割されてYUiが連続応答する問題を解消
+
+### v10 — ECAPA-TDNN ニューラル声紋識別
+- **ECAPA-TDNN**: SpeechBrain の VoxCeleb 学習済みモデルを CoreML に変換し、192次元ニューラル話者埋め込みを実現
+- **コサイン類似度識別**: L2正規化済み埋め込みベクトル同士の内積で話者マッチング（MFCCのユークリッド距離から大幅精度向上）
+- **自動モード切替**: アプリ起動時に ECAPA-TDNN をバックグラウンドロードし、成功したらニューラルモードに自動切替。失敗時は MFCC フォールバック
+- **リサンプリング**: マイク入力 44100Hz → 16kHz に線形補間で変換し、80次元メルスペクトログラムを計算
+- **CoreML Neural Engine**: Apple Neural Engine / GPU を活用した高速推論（3秒音声で20-50ms）
+- **モデルサイズ**: ~42MB（.mlpackage としてアプリにバンドル、初回起動時にコンパイル）
+- **YUi応答頻度調整**: 高頻度モードの沈黙タイマーを8秒→20秒に変更（過度な応答を抑制）
 
 ## ライセンス
 

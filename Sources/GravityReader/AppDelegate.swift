@@ -32,6 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // ルーム音声文字起こし（ScreenCaptureKit で GRAVITY の音声を直接キャプチャ）
         roomTranscription = RoomTranscriptionManager()
+        roomTranscription?.diarizer.initializeNeuralModel()  // ECAPA-TDNN ロード開始
         roomTranscription?.onLog = { [weak self] message in
             self?.logWindowController?.addEntry(message)
         }

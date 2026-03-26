@@ -2,13 +2,13 @@ import Foundation
 
 /// YUiの応答頻度
 enum YUiFrequency: String, CaseIterable {
-    case high = "高（8秒）"
+    case high = "高（20秒）"
     case medium = "中（1分）"
     case low = "低（3分）"
 
     var interval: TimeInterval {
         switch self {
-        case .high: return 8.0
+        case .high: return 20.0
         case .medium: return 60.0
         case .low: return 180.0
         }

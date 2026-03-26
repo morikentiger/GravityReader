@@ -8,6 +8,9 @@ let package = Package(
         .executableTarget(
             name: "GravityReader",
             path: "Sources/GravityReader",
+            resources: [
+                .copy("Resources/SpeakerEmbedding.mlpackage")
+            ],
             swiftSettings: [
                 .unsafeFlags(["-strict-concurrency=minimal"])
             ]
