@@ -196,6 +196,9 @@ class RoomTranscriptionManager {
 
         guard samples.count >= 22050 else { return "不明" }  // 最低0.5秒
 
+        // ピッチ複合判定用に生音声サンプルをセット
+        diarizer.setRawSamplesForNextIdentify(samples)
+
         if let features = diarizer.extractFeatures(from: samples),
            let result = diarizer.identifyWithConfidence(features: features) {
             lastIdentifiedSpeaker = result.speaker

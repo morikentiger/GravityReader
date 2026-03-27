@@ -24,6 +24,10 @@ class VoiceDiarizer {
         var sampleCount: Int
         /// プロファイルのモード（neural or mfcc）
         var mode: Mode
+        /// ピッチ統計（複合判定用）: 平均F0(Hz)
+        var pitchMean: Float?
+        /// ピッチ統計: F0標準偏差(Hz)
+        var pitchStd: Float?
     }
 
     /// 識別の確信度レベル
@@ -285,7 +289,19 @@ class VoiceDiarizer {
         }
 
         enroll(speaker: speaker, features: features)
+
+        // ピッチ統計も登録（複合判定用）
+        enrollPitchStats(speaker: speaker, samples: samples)
+
         return (true, "登録完了！品質: RMS=\(String(format: "%.3f", quality.averageRMS)) 有声率=\(String(format: "%.0f%%", quality.voicedRatio * 100))")
+    }
+
+    /// 直近の識別に使った生音声サンプル（ピッチ複合判定用）
+    private var lastIdentifySamples: [Float]?
+
+    /// 識別前に生音声をセットする（ピッチ複合判定で使用）
+    func setRawSamplesForNextIdentify(_ samples: [Float]) {
+        lastIdentifySamples = samples
     }
 
     /// 音声特徴量から最も近い話者を推定
@@ -408,23 +424,55 @@ class VoiceDiarizer {
         var unknownReason: UnknownReason? = nil
         var returnValue: (result: (speaker: String, confidence: Float), level: IdentifyConfidence)? = nil
 
+        // --- ピッチ複合スコアリング ---
+        // マージンが不十分な場合、ピッチ一致度でリスコアリング
+        var pitchAdjustedResults = results
+        var pitchUsed = false
+        if let rawSamples = lastIdentifySamples, results.count >= 2, margin < similarityMargin {
+            var pitchScores: [String: Float] = [:]
+            for r in results {
+                if let profile = profiles[r.name], profile.pitchMean != nil {
+                    pitchScores[r.name] = pitchMatchScore(samples: rawSamples, profile: profile) ?? 0.5
+                }
+            }
+            // ピッチスコアが取得できた場合、複合スコア = 0.7*embedding + 0.3*pitch
+            if pitchScores.count >= 2 {
+                pitchUsed = true
+                pitchAdjustedResults = results.map { r in
+                    let pitchScore = pitchScores[r.name] ?? 0.5
+                    let combined = r.similarity * 0.7 + pitchScore * 0.3
+                    return (r.name, combined)
+                }
+                pitchAdjustedResults.sort { $0.similarity > $1.similarity }
+
+                let pitchStr = pitchScores.map { "\($0.key):\(String(format: "%.2f", $0.value))" }.joined(separator: " ")
+                onLog?("🎵 ピッチ補正: \(pitchStr)")
+            }
+        }
+        lastIdentifySamples = nil  // 使い終わったらクリア
+
+        // ピッチ補正後のbest/secondを使って判定
+        let effectiveBest = pitchUsed ? pitchAdjustedResults[0] : best
+        let effectiveSecond: (name: String, similarity: Float)? = pitchAdjustedResults.count >= 2 ? pitchAdjustedResults[1] : nil
+        let effectiveMargin = effectiveSecond != nil ? effectiveBest.similarity - effectiveSecond!.similarity : Float(1.0)
+
         if best.similarity < minSimilarity {
-            // 全員低すぎ
+            // 全員低すぎ（元のembeddingスコアで判断）
             decisionType = "unknown"
             finalDecision = "不明"
             unknownReason = .belowMinSimilarity
             addVote(speaker: "不明", score: 0)
-        } else if results.count <= 1 || margin >= similarityMargin {
-            // 厳格マージン OK or 1人のみ
-            decisionType = "strict"
-            finalDecision = best.name
-            addVote(speaker: best.name, score: best.similarity)
-            returnValue = ((best.name, best.similarity), .strict)
-        } else if margin >= softMargin {
+        } else if results.count <= 1 || effectiveMargin >= similarityMargin {
+            // 厳格マージン OK or 1人のみ（ピッチ補正後のマージンで判断）
+            decisionType = pitchUsed ? "strict+pitch" : "strict"
+            finalDecision = effectiveBest.name
+            addVote(speaker: effectiveBest.name, score: best.similarity)
+            returnValue = ((effectiveBest.name, best.similarity), pitchUsed ? .estimated : .strict)
+        } else if effectiveMargin >= softMargin {
             // ソフトマージン → 多数決候補
             decisionType = "soft"
-            addVote(speaker: best.name, score: best.similarity)
-            onLog?("⚠️ マージン不足: \(best.name)(\(String(format: "%.3f", best.similarity))) vs \(second!.name)(\(String(format: "%.3f", second!.similarity))) margin=\(String(format: "%.3f", margin))")
+            addVote(speaker: effectiveBest.name, score: best.similarity)
+            onLog?("⚠️ マージン不足: \(effectiveBest.name)(\(String(format: "%.3f", effectiveBest.similarity))) vs \(effectiveSecond!.name)(\(String(format: "%.3f", effectiveSecond!.similarity))) margin=\(String(format: "%.3f", effectiveMargin))")
 
             if let voted = resolveByVoting() {
                 decisionType = "voted"
@@ -441,7 +489,7 @@ class VoiceDiarizer {
             finalDecision = "不明"
             unknownReason = .belowMargin
             addVote(speaker: "不明", score: 0)
-            onLog?("⚠️ マージン不足: \(best.name)(\(String(format: "%.3f", best.similarity))) vs \(second!.name)(\(String(format: "%.3f", second!.similarity))) margin=\(String(format: "%.3f", margin))")
+            onLog?("⚠️ マージン不足: \(effectiveBest.name)(\(String(format: "%.3f", effectiveBest.similarity))) vs \(effectiveSecond!.name)(\(String(format: "%.3f", effectiveSecond!.similarity))) margin=\(String(format: "%.3f", effectiveMargin))")
         }
 
         // --- 構造化ログ出力（P0-1）---
@@ -556,7 +604,8 @@ class VoiceDiarizer {
                 onLog?("   \(names[i]) ↔ \(names[j]): \(String(format: "%.4f", sim)) \(status)")
             }
             if let p = profiles[names[i]] {
-                onLog?("   \(names[i]): サンプル数=\(p.sampleCount), 適応学習残り=\(max(0, maxAdaptiveUpdates - p.sampleCount))回")
+                let pitchStr = p.pitchMean != nil ? ", ピッチ=\(String(format: "%.0f", p.pitchMean!))Hz±\(String(format: "%.0f", p.pitchStd ?? 0))Hz" : ""
+                onLog?("   \(names[i]): サンプル数=\(p.sampleCount), 適応学習残り=\(max(0, maxAdaptiveUpdates - p.sampleCount))回\(pitchStr)")
             }
         }
         onLog?("📊 ========================")
@@ -736,6 +785,68 @@ class VoiceDiarizer {
         let pitchFeatures = [pitchMean * pitchWeight, pitchStd * pitchWeight, pitchRange * pitchWeight]
 
         return mean + std + deltaMean + pitchFeatures
+    }
+
+    // MARK: - ピッチ統計計算（複合判定用）
+
+    /// 音声サンプルからピッチ統計（平均F0, 標準偏差）を計算
+    func computePitchStats(from samples: [Float]) -> (mean: Float, std: Float)? {
+        let frameSize = 2048
+        let hopSize = 512
+        var pitches: [Float] = []
+
+        var i = 0
+        while i + frameSize <= samples.count {
+            let frame = Array(samples[i..<(i + frameSize)])
+            if let f0 = estimatePitch(frame) {
+                pitches.append(f0)
+            }
+            i += hopSize
+        }
+
+        guard pitches.count >= 3 else { return nil }  // 最低3フレーム必要
+
+        let mean = pitches.reduce(0, +) / Float(pitches.count)
+        let variance = pitches.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(pitches.count)
+        let std = sqrtf(variance)
+
+        return (mean, std)
+    }
+
+    /// 登録時にピッチ統計も保存
+    func enrollPitchStats(speaker: String, samples: [Float]) {
+        guard var profile = profiles[speaker] else { return }
+
+        if let stats = computePitchStats(from: samples) {
+            if let existingMean = profile.pitchMean {
+                // EMAでブレンド
+                let alpha: Float = 0.3
+                profile.pitchMean = existingMean * (1 - alpha) + stats.mean * alpha
+                profile.pitchStd = (profile.pitchStd ?? stats.std) * (1 - alpha) + stats.std * alpha
+            } else {
+                profile.pitchMean = stats.mean
+                profile.pitchStd = stats.std
+            }
+            profiles[speaker] = profile
+            onLog?("   🎵 ピッチ: 平均\(String(format: "%.0f", profile.pitchMean!))Hz, 標準偏差\(String(format: "%.0f", profile.pitchStd!))Hz")
+            saveProfiles()
+        }
+    }
+
+    /// リアルタイム音声からピッチスコアを計算（0.0-1.0、高いほど一致）
+    private func pitchMatchScore(samples: [Float], profile: VoiceProfile) -> Float? {
+        guard let profileMean = profile.pitchMean,
+              let profileStd = profile.pitchStd else { return nil }
+
+        guard let currentStats = computePitchStats(from: samples) else { return nil }
+
+        // 平均ピッチの差をプロファイルのstdでスケーリング
+        let diff = abs(currentStats.mean - profileMean)
+        let tolerance = max(profileStd * 2.0, 30.0)  // 最低30Hz幅の許容
+
+        // ガウシアンスコア: exp(-diff^2 / (2*tolerance^2))
+        let score = expf(-(diff * diff) / (2 * tolerance * tolerance))
+        return score
     }
 
     // MARK: - ピッチ推定（自己相関法）
@@ -943,13 +1054,16 @@ class VoiceDiarizer {
     func saveProfiles() {
         var data: [[String: Any]] = []
         for (_, profile) in profiles {
-            data.append([
+            var dict: [String: Any] = [
                 "name": profile.name,
                 "features": profile.features.map { Double($0) },
                 "featureDim": profile.features.count,
                 "sampleCount": profile.sampleCount,
                 "mode": profile.mode == .neural ? "neural" : "mfcc"
-            ])
+            ]
+            if let pm = profile.pitchMean { dict["pitchMean"] = Double(pm) }
+            if let ps = profile.pitchStd { dict["pitchStd"] = Double(ps) }
+            data.append(dict)
         }
         if let json = try? JSONSerialization.data(withJSONObject: data),
            let str = String(data: json, encoding: .utf8) {
@@ -966,13 +1080,17 @@ class VoiceDiarizer {
                   let count = item["sampleCount"] as? Int else { continue }
 
             let profileMode: Mode = (item["mode"] as? String) == "neural" ? .neural : .mfcc
+            let pitchMean = (item["pitchMean"] as? Double).map { Float($0) }
+            let pitchStd = (item["pitchStd"] as? Double).map { Float($0) }
 
             if let feats = item["features"] as? [Double], feats.count == featureDimension, profileMode == mode {
                 profiles[name] = VoiceProfile(
                     name: name,
                     features: feats.map { Float($0) },
                     sampleCount: count,
-                    mode: profileMode
+                    mode: profileMode,
+                    pitchMean: pitchMean,
+                    pitchStd: pitchStd
                 )
             } else {
                 onLog?("⚠️ \(name) の声紋は現在のモード(\(mode == .neural ? "neural" : "mfcc"))と互換性がないため再登録が必要です")
