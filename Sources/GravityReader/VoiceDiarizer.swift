@@ -86,13 +86,18 @@ class VoiceDiarizer {
 
     // --- ニューラルモード用パラメータ ---
     var minSimilarity: Float = 0.45
-    var similarityMargin: Float = 0.06   // 厳格マージン（0.08→0.06に緩和）
-    var softMargin: Float = 0.01          // ソフトマージン（0.02→0.01に緩和、多数決でカバー）
+    var similarityMargin: Float = 0.06   // 厳格マージン
+    var softMargin: Float = 0.01          // ソフトマージン（多数決でカバー）
 
     // --- 時間的多数決（temporal voting）---
     private var recentVotes: [(speaker: String, score: Float)] = []
     private let votingWindowSize = 5
     private let votingMinCount = 3
+
+    // --- スコア正規化（Adaptive Score Normalization）---
+    // 各話者の「普段のスコア」を追跡し、相対的な異常値で判定
+    private var scoreHistory: [String: [Float]] = [:]  // 話者名 → 直近スコア履歴
+    private let scoreHistoryMaxSize = 30                // 直近30回分を保持
 
     // --- MFCCモード用パラメータ ---
     var maxDistance: Float = 30.0
@@ -411,12 +416,51 @@ class VoiceDiarizer {
         guard !results.isEmpty else { return nil }
         results.sort { $0.similarity > $1.similarity }
 
+        // スコア履歴を更新
+        for r in results {
+            scoreHistory[r.name, default: []].append(r.similarity)
+            if scoreHistory[r.name]!.count > scoreHistoryMaxSize {
+                scoreHistory[r.name]!.removeFirst()
+            }
+        }
+
         let scoreStr = results.map { "\($0.name):\(String(format: "%.3f", $0.similarity))" }.joined(separator: " ")
         onLog?("🔍 声紋照合(neural): \(scoreStr)")
 
-        let best = results[0]
-        let second: (name: String, similarity: Float)? = results.count >= 2 ? results[1] : nil
+        // --- スコア正規化 ---
+        // 各話者の「普段のスコア」を基準に、今のスコアがどれだけ高いかを評価
+        // もりけんが常に0.95+出すなら、0.96は「普通」。takaが普段0.70なら、0.90は「異常に高い」
+        var normalizedResults: [(name: String, similarity: Float, rawSimilarity: Float)] = []
+        let hasEnoughHistory = results.allSatisfy { (scoreHistory[$0.name]?.count ?? 0) >= 5 }
+
+        if hasEnoughHistory && results.count >= 2 {
+            for r in results {
+                let history = scoreHistory[r.name]!
+                let mean = history.reduce(0, +) / Float(history.count)
+                let variance = history.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(history.count)
+                let std = max(sqrtf(variance), 0.01)  // 0除算防止
+
+                // Z-score: 今のスコアが平均からどれだけ偏差しているか
+                let zScore = (r.similarity - mean) / std
+                // 正規化スコア: 元のスコアにZ-scoreのボーナス/ペナルティを加える
+                // Z-scoreが高い = この話者にとって「異常に高いマッチ」 = 本人の可能性が高い
+                let normalizedScore = r.similarity + zScore * 0.02  // 重み0.02でブレンド
+                normalizedResults.append((r.name, normalizedScore, r.similarity))
+            }
+            normalizedResults.sort { $0.similarity > $1.similarity }
+        } else {
+            normalizedResults = results.map { ($0.name, $0.similarity, $0.similarity) }
+        }
+
+        let best = normalizedResults[0]
+        let second: (name: String, similarity: Float, rawSimilarity: Float)? = normalizedResults.count >= 2 ? normalizedResults[1] : nil
         let margin = second != nil ? best.similarity - second!.similarity : Float(1.0)
+        let rawBestSim = best.rawSimilarity
+
+        // 正規化でランキングが変わった場合ログ出力
+        if hasEnoughHistory && results.count >= 2 && results[0].name != normalizedResults[0].name {
+            onLog?("📊 スコア正規化で順位変動: \(results[0].name)→\(normalizedResults[0].name)")
+        }
 
         // --- 判定ロジック ---
         var decisionType: String
@@ -424,67 +468,62 @@ class VoiceDiarizer {
         var unknownReason: UnknownReason? = nil
         var returnValue: (result: (speaker: String, confidence: Float), level: IdentifyConfidence)? = nil
 
-        // --- ピッチ複合スコアリング ---
-        // マージンが不十分な場合、ピッチ一致度でリスコアリング
-        var pitchAdjustedResults = results
+        // --- ピッチ補助判定 ---
+        // マージンがまだ不足する場合、ピッチで追加ブースト
+        var effectiveBest = best
+        var effectiveSecond = second
+        var effectiveMargin = margin
         var pitchUsed = false
-        if let rawSamples = lastIdentifySamples, results.count >= 2, margin < similarityMargin {
+
+        if let rawSamples = lastIdentifySamples, normalizedResults.count >= 2, margin < similarityMargin {
             var pitchScores: [String: Float] = [:]
-            for r in results {
+            for r in normalizedResults {
                 if let profile = profiles[r.name], profile.pitchMean != nil {
                     pitchScores[r.name] = pitchMatchScore(samples: rawSamples, profile: profile) ?? 0.5
                 }
             }
-            // ピッチスコアが取得できた場合、複合スコア = 0.7*embedding + 0.3*pitch
             if pitchScores.count >= 2 {
                 pitchUsed = true
-                pitchAdjustedResults = results.map { r in
-                    let pitchScore = pitchScores[r.name] ?? 0.5
-                    let combined = r.similarity * 0.7 + pitchScore * 0.3
-                    return (r.name, combined)
+                var combined = normalizedResults.map { r -> (name: String, similarity: Float, rawSimilarity: Float) in
+                    let ps = pitchScores[r.name] ?? 0.5
+                    return (r.name, r.similarity * 0.8 + ps * 0.2, r.rawSimilarity)
                 }
-                pitchAdjustedResults.sort { $0.similarity > $1.similarity }
+                combined.sort { $0.similarity > $1.similarity }
+                effectiveBest = combined[0]
+                effectiveSecond = combined.count >= 2 ? combined[1] : nil
+                effectiveMargin = effectiveSecond != nil ? effectiveBest.similarity - effectiveSecond!.similarity : 1.0
 
                 let pitchStr = pitchScores.map { "\($0.key):\(String(format: "%.2f", $0.value))" }.joined(separator: " ")
                 onLog?("🎵 ピッチ補正: \(pitchStr)")
             }
         }
-        lastIdentifySamples = nil  // 使い終わったらクリア
+        lastIdentifySamples = nil
 
-        // ピッチ補正後のbest/secondを使って判定
-        let effectiveBest = pitchUsed ? pitchAdjustedResults[0] : best
-        let effectiveSecond: (name: String, similarity: Float)? = pitchAdjustedResults.count >= 2 ? pitchAdjustedResults[1] : nil
-        let effectiveMargin = effectiveSecond != nil ? effectiveBest.similarity - effectiveSecond!.similarity : Float(1.0)
-
-        if best.similarity < minSimilarity {
-            // 全員低すぎ（元のembeddingスコアで判断）
+        if rawBestSim < minSimilarity {
             decisionType = "unknown"
             finalDecision = "不明"
             unknownReason = .belowMinSimilarity
             addVote(speaker: "不明", score: 0)
-        } else if results.count <= 1 || effectiveMargin >= similarityMargin {
-            // 厳格マージン OK or 1人のみ（ピッチ補正後のマージンで判断）
-            decisionType = pitchUsed ? "strict+pitch" : "strict"
+        } else if normalizedResults.count <= 1 || effectiveMargin >= similarityMargin {
+            decisionType = pitchUsed ? "strict+pitch" : (hasEnoughHistory && results[0].name != normalizedResults[0].name ? "strict+norm" : "strict")
             finalDecision = effectiveBest.name
-            addVote(speaker: effectiveBest.name, score: best.similarity)
-            returnValue = ((effectiveBest.name, best.similarity), pitchUsed ? .estimated : .strict)
+            addVote(speaker: effectiveBest.name, score: rawBestSim)
+            returnValue = ((effectiveBest.name, rawBestSim), (pitchUsed || hasEnoughHistory && results[0].name != normalizedResults[0].name) ? .estimated : .strict)
         } else if effectiveMargin >= softMargin {
-            // ソフトマージン → 多数決候補
             decisionType = "soft"
-            addVote(speaker: effectiveBest.name, score: best.similarity)
+            addVote(speaker: effectiveBest.name, score: rawBestSim)
             onLog?("⚠️ マージン不足: \(effectiveBest.name)(\(String(format: "%.3f", effectiveBest.similarity))) vs \(effectiveSecond!.name)(\(String(format: "%.3f", effectiveSecond!.similarity))) margin=\(String(format: "%.3f", effectiveMargin))")
 
             if let voted = resolveByVoting() {
                 decisionType = "voted"
                 finalDecision = voted.speaker
                 onLog?("🗳 多数決で判定: \(voted.speaker)（\(voted.count)/\(votingWindowSize)票）")
-                returnValue = ((voted.speaker, best.similarity), .estimated)
+                returnValue = ((voted.speaker, rawBestSim), .estimated)
             } else {
                 finalDecision = "不明"
                 unknownReason = .voteNotConverged
             }
         } else {
-            // マージンが極めて小さい
             decisionType = "unknown"
             finalDecision = "不明"
             unknownReason = .belowMargin
