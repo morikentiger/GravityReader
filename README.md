@@ -275,6 +275,12 @@ GRAVITY.app には外部 API がないため、macOS Accessibility API (`AXUIEle
 - **Unknown理由付き**: 不明判定の内訳を分類（insufficient_quality / below_min_similarity / below_margin / vote_not_converged）
 - **プロファイル健全性サマリー**: 各話者のサンプル数・最近接他話者・適応学習残り回数を一覧取得可能に
 
+### v12.2 — YUi即応答 & 声紋マージン調整
+- **YUi適応的応答タイミング**: 会話テンポに応じて自動調整。盛り上がり中は8秒（邪魔しない）、普通5秒、ゆっくり3秒、沈黙後2秒で即反応
+- **高頻度モード高速化**: 従来の固定20秒→テンポ適応型2-8秒に大幅短縮
+- **声紋strictマージン緩和**: 0.08→0.06。プロファイル間距離が十分あるケースでのfalse unknown削減
+- **声紋softマージン緩和**: 0.02→0.01。多数決(temporal voting)による判定をより活用
+
 ## ライセンス
 
 MIT License

@@ -82,8 +82,8 @@ class VoiceDiarizer {
 
     // --- ニューラルモード用パラメータ ---
     var minSimilarity: Float = 0.45
-    var similarityMargin: Float = 0.08
-    var softMargin: Float = 0.02
+    var similarityMargin: Float = 0.06   // 厳格マージン（0.08→0.06に緩和）
+    var softMargin: Float = 0.01          // ソフトマージン（0.02→0.01に緩和、多数決でカバー）
 
     // --- 時間的多数決（temporal voting）---
     private var recentVotes: [(speaker: String, score: Float)] = []

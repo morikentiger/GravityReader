@@ -2,15 +2,16 @@ import Foundation
 
 /// YUiの応答頻度
 enum YUiFrequency: String, CaseIterable {
-    case high = "高（20秒）"
-    case medium = "中（1分）"
-    case low = "低（3分）"
+    case high = "高（即応答）"
+    case medium = "中（20秒）"
+    case low = "低（1分）"
 
-    var interval: TimeInterval {
+    /// ベース待機時間（会話テンポで動的に調整される）
+    var baseInterval: TimeInterval {
         switch self {
-        case .high: return 20.0
-        case .medium: return 60.0
-        case .low: return 180.0
+        case .high: return 5.0      // 5秒ベース → テンポに応じて3-8秒
+        case .medium: return 20.0
+        case .low: return 60.0
         }
     }
 }
@@ -85,6 +86,33 @@ class YUiManager {
         case slow     // ゆっくり
         case normal   // 普通
         case lively   // 盛り上がってる
+    }
+
+    /// 会話テンポに応じた応答待機時間を計算
+    /// 高頻度モード: 盛り上がり中は長く待ち（邪魔しない）、落ち着いたら素早く反応
+    private func adaptiveResponseDelay() -> TimeInterval {
+        let base = frequency.baseInterval
+
+        // medium / low はそのまま固定
+        guard frequency == .high else { return base }
+
+        let tempo = conversationTempo()
+        let buffered = messageBuffer.count
+
+        switch tempo {
+        case .lively:
+            // 盛り上がり中 → 邪魔しない（8秒待ち）
+            return 8.0
+        case .normal:
+            // 普通のペース → 5秒
+            return 5.0
+        case .slow:
+            // ゆっくり → 素早く反応（3秒）
+            return 3.0
+        case .silent:
+            // 沈黙 → 即反応（2秒、バッファに溜まっていれば）
+            return buffered > 0 ? 2.0 : base
+        }
     }
 
     // MARK: - タイマー
@@ -715,13 +743,14 @@ class YUiManager {
         // 古いメモリを削除
         pruneMemory()
 
-        // 応答タイマーリセット
+        // 応答タイマーリセット（会話テンポに応じた動的待機時間）
         responseTimer?.cancel()
         let work = DispatchWorkItem { [weak self] in
             self?.onTimerFired()
         }
         responseTimer = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + frequency.interval, execute: work)
+        let delay = adaptiveResponseDelay()
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
 
         // アイドルタイマーリセット
         resetIdleTimer()
