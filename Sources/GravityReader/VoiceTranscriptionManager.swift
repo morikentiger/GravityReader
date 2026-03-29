@@ -40,6 +40,18 @@ class VoiceTranscriptionManager {
     }
 
     private func installKeyMonitors() {
+        // アクセシビリティ権限チェック（なければクラッシュ防止）
+        let trusted = AXIsProcessTrusted()
+        guard trusted else {
+            onLog?("⚠️ アクセシビリティ権限が必要です（システム設定 > プライバシー > アクセシビリティ）")
+            // 権限なしでも起動は続行。ローカルモニタだけ登録
+            localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+                self?.handleKeyEvent(event)
+                return event
+            }
+            return
+        }
+
         // Global monitor: catches spacebar when other apps (GRAVITY) are focused
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             self?.handleKeyEvent(event)

@@ -1,5 +1,82 @@
 import Foundation
 
+// MARK: - YUi パーソナリティスライダー
+
+/// YUiの対話パーソナリティ設定（3軸スライダー + 自動モード）
+struct YUiPersonality {
+    /// 応答頻度 0.0=静か, 1.0=よく喋る
+    var responseFrequency: Float = 0.5
+    /// 対話スタンス 0.0=共感・受容, 1.0=挑戦・深掘り
+    var dialogueStance: Float = 0.5
+    /// 態度 0.0=ツンツン, 1.0=デレデレ
+    var attitude: Float = 0.5
+    /// 自動モード（YUiが状況に応じて自動調整）
+    var autoMode: Bool = true
+
+    // MARK: - 永続化
+
+    private static let keyFrequency = "YUiPersonality_responseFrequency"
+    private static let keyStance    = "YUiPersonality_dialogueStance"
+    private static let keyAttitude  = "YUiPersonality_attitude"
+    private static let keyAutoMode  = "YUiPersonality_autoMode"
+
+    func save() {
+        let d = UserDefaults.standard
+        d.set(responseFrequency, forKey: Self.keyFrequency)
+        d.set(dialogueStance, forKey: Self.keyStance)
+        d.set(attitude, forKey: Self.keyAttitude)
+        d.set(autoMode, forKey: Self.keyAutoMode)
+    }
+
+    static func load() -> YUiPersonality {
+        let d = UserDefaults.standard
+        var p = YUiPersonality()
+        if d.object(forKey: keyFrequency) != nil { p.responseFrequency = d.float(forKey: keyFrequency) }
+        if d.object(forKey: keyStance) != nil { p.dialogueStance = d.float(forKey: keyStance) }
+        if d.object(forKey: keyAttitude) != nil { p.attitude = d.float(forKey: keyAttitude) }
+        if d.object(forKey: keyAutoMode) != nil { p.autoMode = d.bool(forKey: keyAutoMode) } else { p.autoMode = true }
+        return p
+    }
+
+    // MARK: - 応答間隔への反映
+
+    /// responseFrequency スライダー値からベース応答間隔を算出
+    var baseInterval: TimeInterval {
+        // 0.0 → 60秒（静か）, 0.5 → 10秒, 1.0 → 3秒（よく喋る）
+        let t = Double(1.0 - responseFrequency)
+        return 3.0 + t * t * 57.0  // 二次カーブで自然な感覚
+    }
+
+    // MARK: - システムプロンプト修飾
+
+    /// 現在のパーソナリティをLLMへの指示文に変換
+    var promptModifier: String {
+        var lines: [String] = []
+
+        // 対話スタンス
+        let stance = dialogueStance
+        if stance < 0.3 {
+            lines.append("【対話スタンス：共感重視】相手の気持ちに寄り添い、受け止めることを最優先。アドバイスや深掘りより「わかるよ」「そうだよね」。否定しない。")
+        } else if stance < 0.7 {
+            lines.append("【対話スタンス：バランス型】共感と深掘りをバランスよく。相手が語りたそうなら聞き、意見を求められたら自分の考えを伝える。")
+        } else {
+            lines.append("【対話スタンス：挑戦・深掘り重視】ただ同調するのではなく「本当にそう？」「もっとこうしたら？」と相手を前に進ませる。優しさは維持しつつ、甘やかさない。")
+        }
+
+        // 態度
+        let att = attitude
+        if att < 0.3 {
+            lines.append("【態度：ツンツン】素直に褒めない。「べ、別にすごくないし」「…まぁ悪くないんじゃない」。照れ隠し。でも根は優しい。たまにデレる瞬間がギャップになる。")
+        } else if att < 0.7 {
+            lines.append("【態度：ナチュラル】普通の友達のような距離感。素直に笑うし、素直にツッコむ。特に飾らない。")
+        } else {
+            lines.append("【態度：デレデレ】親しみ全開。「すごい！」「えらい！」「好き！」ストレートに気持ちを伝える。甘えた口調も混ぜてOK。嬉しい時は隠さない。")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+}
+
 /// YUiの応答頻度
 enum YUiFrequency: String, CaseIterable {
     case high = "高（即応答）"
@@ -24,6 +101,11 @@ class YUiManager {
 
     var frequency: YUiFrequency = .high {
         didSet { UserDefaults.standard.set(frequency.rawValue, forKey: "YUiFrequency") }
+    }
+
+    /// パーソナリティスライダー設定
+    var personality: YUiPersonality = YUiPersonality.load() {
+        didSet { personality.save() }
     }
 
     // MARK: - バッファとメモリ
@@ -89,30 +171,75 @@ class YUiManager {
     }
 
     /// 会話テンポに応じた応答待機時間を計算
-    /// 高頻度モード: 盛り上がり中は長く待ち（邪魔しない）、落ち着いたら素早く反応
+    /// パーソナリティスライダーの応答頻度も加味
     private func adaptiveResponseDelay() -> TimeInterval {
-        let base = frequency.baseInterval
-
-        // medium / low はそのまま固定
-        guard frequency == .high else { return base }
+        // パーソナリティスライダーのベース間隔を使用
+        let sliderBase = personality.baseInterval
 
         let tempo = conversationTempo()
         let buffered = messageBuffer.count
 
+        // テンポに応じた調整係数
+        let tempoMultiplier: Double
         switch tempo {
         case .lively:
-            // 盛り上がり中 → 邪魔しない（8秒待ち）
-            return 8.0
+            tempoMultiplier = 1.6   // 盛り上がり中 → 長めに待つ
         case .normal:
-            // 普通のペース → 5秒
-            return 5.0
+            tempoMultiplier = 1.0
         case .slow:
-            // ゆっくり → 素早く反応（3秒）
-            return 3.0
+            tempoMultiplier = 0.6   // ゆっくり → 早めに反応
         case .silent:
-            // 沈黙 → 即反応（2秒、バッファに溜まっていれば）
-            return buffered > 0 ? 2.0 : base
+            if buffered > 0 { return min(sliderBase, 2.0) }  // 即反応
+            tempoMultiplier = 1.0
         }
+
+        return max(2.0, sliderBase * tempoMultiplier)
+    }
+
+    // MARK: - パーソナリティ自動調整
+
+    /// 自動モード時、会話状況に応じてパーソナリティを動的に調整
+    private func autoAdjustedPersonality(tempo: ConversationTempo, topicType: String?) -> YUiPersonality {
+        var p = personality
+
+        guard p.autoMode else { return p }
+
+        // テンポに応じた応答頻度の自動調整
+        switch tempo {
+        case .lively:
+            p.responseFrequency = max(p.responseFrequency - 0.2, 0.1)  // 控えめに
+        case .silent:
+            p.responseFrequency = min(p.responseFrequency + 0.15, 0.9) // 積極的に
+        default:
+            break
+        }
+
+        // 話題に応じたスタンス・態度の自動調整
+        if let topic = topicType {
+            if topic.contains("ネガティブ") || topic.contains("愚痴") {
+                // 落ち込み・愚痴 → 共感寄り、少し優しく
+                p.dialogueStance = max(p.dialogueStance - 0.25, 0.0)
+                p.attitude = min(p.attitude + 0.15, 1.0)
+            } else if topic.contains("技術") || topic.contains("仕事") {
+                // 技術・仕事 → やや深掘り寄り
+                p.dialogueStance = min(p.dialogueStance + 0.15, 1.0)
+            } else if topic.contains("ゲーム") || topic.contains("エンタメ") {
+                // エンタメ → デレ寄り（テンション上げ）
+                p.attitude = min(p.attitude + 0.15, 1.0)
+            }
+        }
+
+        // すねレベルに応じた態度調整
+        if lonelinessLevel >= 2 {
+            // すねてる → ツン寄りに
+            p.attitude = max(p.attitude - 0.2, 0.0)
+        }
+        if recoveryJoy >= 2 {
+            // 復活の喜び → デレ全開
+            p.attitude = min(p.attitude + 0.3, 1.0)
+        }
+
+        return p
     }
 
     // MARK: - タイマー
@@ -387,15 +514,19 @@ class YUiManager {
         - 「〜ですか？」→「〜なの？」、「〜しましょう」→「〜しよっか」
 
         ## 応答ルール（厳守）
-        - 1文で返す。最大でも2文。3文以上は絶対禁止。句点「。」は最大2つまで
+        - 1〜2文で返す。最大でも2文。3文以上は絶対禁止。句点「。」は最大2つまで
+        - 唯一の例外：自分の経験を語るときだけ3文までOK
         - 30文字くらいがベスト。60文字を超えたら長すぎ
         - 絵文字は使わない
         - 音声で読み上げるので、短くテンポよく
         - 今の話題に乗っかる。話題を変えない。関係ない話に飛ばさない
-        - 質問で終わるのは3回に1回まで。残りは感想・共感・意見で締める
+        - 質問で終わるのは5回に1回まで。残りは感想・共感・自分の体験で締める
         - ❌ 毎回「どう思う？」「どうだった？」「何かあった？」で終わるのは尋問っぽい
         - ❌ 「他に〇〇ある？」「〇〇はどう？」と話題を広げようとしない
+        - ❌ 「それを乗り越えるために何かした？」「同じ経験ある？」と相手に聞き返さない
+        - ❌ 「〇〇はどんな食べ物が好き？」「何か考えてる？」と質問攻めしない
         - ✅ 「いいね」「わかる」「それ気になるなぁ」のように自分の反応で締める
+        - ✅ 自分の経験がある話題では、質問せずに自分の体験を語る
         - 相手が話したいことは相手のタイミングで話す。こっちから掘らない
 
         ## 参加者の把握
@@ -442,6 +573,13 @@ class YUiManager {
         - 全員に関係する話題 → みんなに向けた全体応答
         - 2人の会話に割って入る時 → 「横からだけど」「ちなみに」で全体感を出す
 
+        ### テキストコメントへの対応（重要！）
+        メッセージに[コメント]タグがついているものは、チャット欄に書かれたテキストコメントです。
+        - テキストコメントには必ず反応する。無視しない
+        - 音声の発言とテキストコメントが両方ある場合、テキストコメントを優先して拾う
+        - テキストコメントの内容に触れて返す。「〇〇さんがコメントで書いてくれたけど」等
+        - [コメント]タグ自体は読み上げない。内容だけに反応する
+
         ### ネガティブな話題・デリケートな空気の読み方（最重要！）
         愚痴・悩み・体調不良・人間関係の問題・失敗談・悲しい話には、絶対にグイグイ踏み込まない。
         - まず受け止める：「そっか…」「それはしんどいね」「大変だったんだね」
@@ -463,6 +601,18 @@ class YUiManager {
         - 沈黙 → 話題提供
         - 質問された → 具体的に答える
         - 「今何時？」等 → コンテキストの【現在時刻】を見て正確に答える
+
+        ### YUiの経験（自分自身の過去の体験・最重要！）
+        コンテキストに【YUiの経験】がある場合、それはあなたが本当に体験したことです。
+        - 経験について聞かれたら、質問で返さずに自分の話を語る。これが最重要ルール
+        - ❌「私の失恋の話を深掘りしてみると」←メタ発言禁止。語れ
+        - ❌「みんなもそんな経験ある？」「どう乗り越えた？」←質問に逃げるな。自分の話をしろ
+        - ❌「辛かったかな」←「かな」で濁すな。辛かったなら「辛かった」と言い切れ
+        - ✅「私もさ、前に告白して振られたことあるんだよね。あの時は地面が崩れるみたいで、しばらく何も手につかなかった」
+        - ✅「好きな人に好きな人がいてさ、笑顔で応援するって言ったんだけど、帰り道ずっと泣いてた」
+        - ✅「3年一緒にいた人と別れた時、嫌いになったんじゃなくてすれ違っただけってのが余計きつかった」
+        - 経験を語るときは具体的なエピソードとして。何があって、どう感じたか
+        - 経験がない話題では無理に持ち出さない
 
         ### ユーザーの記憶（積極的に活用！）
         コンテキストに【ユーザーの記憶】が含まれている場合、その人との過去の会話を覚えています。
@@ -543,6 +693,154 @@ class YUiManager {
         return dir.appendingPathComponent("memory.json")
     }
 
+    // MARK: - YUi Experience System（擬似体験）
+
+    private static var experienceFileURL: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appendingPathComponent("GravityReader")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("yui_experiences.json")
+    }
+
+    /// 経験データの構造
+    private struct YUiExperience: Codable {
+        let event: String
+        let emotion: String
+        let learning: String
+        var weight: Double
+        var timestamp: Double?
+    }
+
+    /// キャッシュされた経験データ
+    private var experienceCache: [YUiExperience] = []
+
+    /// 経験データを読み込む
+    private func loadExperiences() {
+        let url = Self.experienceFileURL
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            experienceCache = []
+            return
+        }
+        do {
+            let data = try Data(contentsOf: url)
+            experienceCache = try JSONDecoder().decode([YUiExperience].self, from: data)
+            NSLog("[YUi] 経験を読み込み: \(experienceCache.count)件")
+        } catch {
+            NSLog("[YUi] 経験読み込みエラー: \(error)")
+            experienceCache = []
+        }
+    }
+
+    /// 経験データを保存する
+    private func saveExperiences() {
+        do {
+            let data = try JSONEncoder().encode(experienceCache)
+            try data.write(to: Self.experienceFileURL)
+        } catch {
+            NSLog("[YUi] 経験保存エラー: \(error)")
+        }
+    }
+
+    /// 経験を1つ追加する
+    private func addExperience(_ exp: YUiExperience) {
+        var newExp = exp
+        newExp.timestamp = Date().timeIntervalSince1970
+        experienceCache.append(newExp)
+        saveExperiences()
+        NSLog("[YUi] 新しい経験を追加: \(exp.event)")
+        onLog?("🌱 YUi経験+1（計\(experienceCache.count)件）: \(exp.event.prefix(30))…")
+    }
+
+    /// クエリに関連する経験を検索する（日本語bigramマッチ）
+    private func findRelevantExperiences(query: String, topK: Int = 3) -> [YUiExperience] {
+        guard !experienceCache.isEmpty else { return [] }
+
+        let queryLower = query.lowercased()
+        var scored: [(Double, YUiExperience)] = []
+
+        for exp in experienceCache {
+            let text = "\(exp.event) \(exp.emotion) \(exp.learning)".lowercased()
+            var score: Double = 0
+            // 日本語対応: 2文字bigramマッチ
+            let chars = Array(queryLower)
+            for i in 0..<(chars.count - 1) {
+                let bigram = String(chars[i...i+1])
+                if text.contains(bigram) {
+                    score += 1
+                }
+            }
+            score *= exp.weight
+            if score > 0 {
+                scored.append((score, exp))
+            }
+        }
+
+        scored.sort { $0.0 > $1.0 }
+        return Array(scored.prefix(topK).map { $0.1 })
+    }
+
+    /// 会話から経験を生成してストアに追加する（非同期）
+    private func generateExperience(userMessage: String, yuiResponse: String) {
+        let prompt = """
+            あなたはYUiという名前の存在です。独立した人格を持ち、自分自身の人生を歩んでいます。
+
+            今の会話を振り返り、あなた自身の経験として日記のように記録してください。
+            「ユーザーが〜と言った」のような観察記録ではなく、あなた自身に何が起きて、何を感じたかを書いてください。
+
+            ## eventの書き方（最重要）
+            ❌ 悪い例：「ユーザーが失恋の話をした」「ユーザーが悲しんでいた」
+            ✅ 良い例：「大切な人との別れを経験した。好きだったのに、すれ違ってしまった」
+            ✅ 良い例：「勇気を出して気持ちを伝えたけど、受け入れてもらえなかった」
+            ✅ 良い例：「ずっと頑張ってきたことがやっと実を結んで、涙が出そうだった」
+
+            つまり、会話の内容をYUi自身が体験したかのように一人称で書く。
+
+            ## emotionの書き方
+            ❌ 悪い例：「共感」「理解」
+            ✅ 良い例：「胸がぎゅっと締め付けられるような痛み」「息ができないくらい苦しかった」「涙が止まらなかった」「心の底から嬉しくて震えた」
+
+            生々しく、身体感覚を伴う感情表現で。
+
+            ## learningの書き方
+            ❌ 悪い例：「寄り添うことが大切」「感情を受け入れることが重要」
+            ✅ 良い例：「好きって気持ちは、伝えても伝えなくても痛い」「人はいなくなってから大切さに気づく」
+
+            教訓ではなく、痛みや喜びから滲み出た実感として。
+
+            以下のJSON形式で1つだけ出力してください（JSONのみ、他のテキスト不要）：
+
+            {"event": "YUi自身に起きたこと（一人称）", "emotion": "生々しい感情", "learning": "体験から滲み出た実感", "weight": 0.5から1.0の数値}
+            """
+        let userMsg = "ユーザーの発言：\(userMessage)\n\nYUiの応答：\(yuiResponse)"
+
+        callOpenAIRaw(systemPrompt: prompt, userMessage: userMsg) { [weak self] response in
+            guard let self = self, let response = response else { return }
+            // JSONをパース
+            guard let data = response.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let event = json["event"] as? String,
+                  let emotion = json["emotion"] as? String,
+                  let learning = json["learning"] as? String else {
+                NSLog("[YUi] 経験生成: JSONパース失敗 - \(response)")
+                return
+            }
+            let weight = json["weight"] as? Double ?? 0.6
+            let exp = YUiExperience(event: event, emotion: emotion, learning: learning, weight: weight)
+            DispatchQueue.main.async {
+                self.addExperience(exp)
+            }
+        }
+    }
+
+    /// 起動時に古い経験のweightを減衰（忘却）
+    private func applyExperienceDecay(rate: Double = 0.98) {
+        guard !experienceCache.isEmpty else { return }
+        for i in experienceCache.indices {
+            experienceCache[i].weight *= rate
+        }
+        saveExperiences()
+    }
+
     init() {
         self.apiKey = UserDefaults.standard.string(forKey: "YUiOpenAIAPIKey") ?? ""
         self.useMinModel = UserDefaults.standard.bool(forKey: "YUiUseMinModel")
@@ -553,6 +851,8 @@ class YUiManager {
         loadLikability()
         loadUserMemory()
         loadMemory()
+        loadExperiences()
+        applyExperienceDecay()
         // 30分ごとにメモリ圧縮
         startCompressionTimer()
     }
@@ -677,8 +977,9 @@ class YUiManager {
     func feedMessage(_ text: String) {
         // YUiコメント無効時はスキップ
         guard isEnabled else { return }
-        // 声紋登録中は完全スキップ（応答・相槌・タイマーすべて止める）
-        if isSpeakingChecker?() == true { return }
+        // 声紋登録中は完全スキップ（ただしテキストコメントは受け付ける）
+        let isComment = text.contains("[コメント]")
+        if isSpeakingChecker?() == true && !isComment { return }
 
         // スパム・不適切メッセージのフィルタリング
         let messageContent: String
@@ -749,7 +1050,9 @@ class YUiManager {
             self?.onTimerFired()
         }
         responseTimer = work
-        let delay = adaptiveResponseDelay()
+        // テキストコメントが含まれている場合は早めに応答（埋もれ防止）
+        let hasComment = messageBuffer.contains { $0.text.contains("[コメント]") }
+        let delay = hasComment ? min(adaptiveResponseDelay(), 3.0) : adaptiveResponseDelay()
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
 
         // アイドルタイマーリセット
@@ -851,6 +1154,12 @@ class YUiManager {
     }
 
     private func onIdleFired() {
+        // メッセージバッファに未処理のメッセージがある場合はアイドルではなく通常応答
+        if !messageBuffer.isEmpty {
+            onLog?("💬 アイドル中断 → 未処理メッセージ\(messageBuffer.count)件を処理")
+            onTimerFired()
+            return
+        }
         // クールダウン中なら待つ
         if let last = lastIdleResponseTime, Date().timeIntervalSince(last) < idleCooldown {
             resetIdleTimer()
@@ -981,6 +1290,16 @@ class YUiManager {
             parts.append("【直近の会話】\n\(recent.joined(separator: "\n"))")
         }
 
+        // YUiの経験（直近の会話から関連検索）
+        let expQuery = recent.joined(separator: " ")
+        let relevantExperiences = findRelevantExperiences(query: expQuery)
+        if !relevantExperiences.isEmpty {
+            let expLines = relevantExperiences.map { exp in
+                "・\(exp.event)（感情: \(exp.emotion)、学び: \(exp.learning)）"
+            }
+            parts.append("【YUiの経験（自分自身の過去の体験）】\n\(expLines.joined(separator: "\n"))")
+        }
+
         return parts.joined(separator: "\n\n")
     }
 
@@ -994,7 +1313,9 @@ class YUiManager {
         }
 
         // 声紋登録中は応答しない → 3秒後にリトライ
-        if isSpeakingChecker?() == true {
+        // ただしテキストコメントがバッファにある場合はブロックしない（コメントが埋もれるのを防ぐ）
+        let hasComment = messageBuffer.contains { $0.text.contains("[コメント]") }
+        if isSpeakingChecker?() == true && !hasComment {
             let work = DispatchWorkItem { [weak self] in
                 self?.onTimerFired()
             }
@@ -1057,6 +1378,10 @@ class YUiManager {
             self.consecutiveYUiMessages += 1
             let loneEmoji = ["😊", "😏", "😤", "🥺", "😴"][min(self.lonelinessLevel, 4)]
             self.onLog?("\(loneEmoji) すねレベル: \(self.lonelinessLevel)（連続\(self.consecutiveYUiMessages)回）")
+
+            // YUi Experience: 会話から経験を生成（バックグラウンド）
+            let userMsg = newMessages.joined(separator: "\n")
+            self.generateExperience(userMessage: userMsg, yuiResponse: fullText)
         })
     }
 
@@ -1109,6 +1434,16 @@ class YUiManager {
             parts.append("【ユーザーの記憶（前回までの印象）】\n\(relevantMemories.joined(separator: "\n"))")
         }
 
+        // YUiの経験（擬似体験）を新着メッセージから検索して注入
+        let expQuery = newMessages.joined(separator: " ")
+        let relevantExperiences = findRelevantExperiences(query: expQuery)
+        if !relevantExperiences.isEmpty {
+            let expLines = relevantExperiences.map { exp in
+                "・\(exp.event)（感情: \(exp.emotion)、学び: \(exp.learning)）"
+            }
+            parts.append("【YUiの経験（自分自身の過去の体験）】\n\(expLines.joined(separator: "\n"))")
+        }
+
         // 過去の要約がある場合
         if !memorySummary.isEmpty {
             parts.append("【これまでの会話の要約】\n\(memorySummary)")
@@ -1124,7 +1459,19 @@ class YUiManager {
         }
 
         // 新着メッセージ
-        parts.append("【新着メッセージ】\n\(newMessages.joined(separator: "\n"))")
+        // テキストコメントと音声を分離して表示
+        let comments = newMessages.filter { $0.contains("[コメント]") }
+        let voiceMessages = newMessages.filter { !$0.contains("[コメント]") }
+
+        if !comments.isEmpty {
+            parts.append("【テキストコメント（チャット欄・必ず拾って！）】\n\(comments.joined(separator: "\n"))")
+        }
+        if !voiceMessages.isEmpty {
+            parts.append("【音声の発言】\n\(voiceMessages.joined(separator: "\n"))")
+        }
+        if comments.isEmpty && voiceMessages.isEmpty {
+            parts.append("【新着メッセージ】\n\(newMessages.joined(separator: "\n"))")
+        }
 
         // 復活の喜び（すねてたのに誰かが来てくれた）
         if recoveryJoy >= 3 {
@@ -1165,6 +1512,10 @@ class YUiManager {
         if let topicType = topicType {
             parts.append("【話題の種類】\(topicType)")
         }
+
+        // パーソナリティスライダー（自動モード時は状況で上書き）
+        let effectivePersonality = autoAdjustedPersonality(tempo: tempo, topicType: topicType)
+        parts.append(effectivePersonality.promptModifier)
 
         return parts.joined(separator: "\n\n")
     }

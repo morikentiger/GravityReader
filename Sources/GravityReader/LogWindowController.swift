@@ -42,6 +42,20 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
     private var statsToggleButton: NSButton!
     private var statsVisible = false
 
+    // --- Personality sliders ---
+    private var sliderContainer: NSView!
+    private var frequencySlider: NSSlider!
+    private var stanceSlider: NSSlider!
+    private var attitudeSlider: NSSlider!
+    private var autoModeToggle: NSButton!
+    private var frequencyValueLabel: NSTextField!
+    private var stanceValueLabel: NSTextField!
+    private var attitudeValueLabel: NSTextField!
+    /// コールバック：スライダー変更時
+    var onPersonalityChanged: ((YUiPersonality) -> Void)?
+    /// 現在のパーソナリティ（外部から設定）
+    private var currentPersonality = YUiPersonality.load()
+
     // --- Data model ---
     private var allEntries: [LogEntry] = []
     private var filteredEntryIDs: Set<UUID> = []
@@ -173,6 +187,15 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         statsToggleButton.setButtonType(.pushOnPushOff)
         contentView.addSubview(statsToggleButton)
 
+        // ── Personality slider container (bottom) ──
+        sliderContainer = NSView()
+        sliderContainer.translatesAutoresizingMaskIntoConstraints = false
+        sliderContainer.wantsLayer = true
+        sliderContainer.layer?.backgroundColor = NSColor(white: 0.13, alpha: 1).cgColor
+        contentView.addSubview(sliderContainer)
+
+        buildSliderPanel()
+
         // ── Scroll view + text view (middle) ──
         let sv = NSTextView.scrollableTextView()
         scrollView = sv
@@ -197,8 +220,14 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         statsHeight.priority = .defaultHigh
 
         NSLayoutConstraint.activate([
-            // Stats toggle button at very bottom
-            statsToggleButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+            // Slider container at very bottom
+            sliderContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            sliderContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            sliderContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            sliderContainer.heightAnchor.constraint(equalToConstant: 72),
+
+            // Stats toggle button above slider container
+            statsToggleButton.bottomAnchor.constraint(equalTo: sliderContainer.topAnchor, constant: -2),
             statsToggleButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
             statsToggleButton.heightAnchor.constraint(equalToConstant: 24),
             statsToggleButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 60),
@@ -249,6 +278,176 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         }
         scrollViewBottomConstraint?.isActive = true
         contentView.layoutSubtreeIfNeeded()
+    }
+
+    // MARK: - Personality Slider Panel
+
+    private func buildSliderPanel() {
+        let labelColor = NSColor(white: 0.55, alpha: 1)
+        let valueColor = NSColor(white: 0.8, alpha: 1)
+        let labelFont = NSFont.systemFont(ofSize: 9, weight: .medium)
+        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+
+        // 3つのスライダーを横に並べる
+        // 各スライダー: ラベル(上) + スライダー(中) + 値ラベル(下)
+        let sliderData: [(String, String, Float, Selector)] = [
+            ("応答頻度", "静か ← → よく喋る", currentPersonality.responseFrequency, #selector(frequencySliderChanged(_:))),
+            ("スタンス", "共感 ← → 挑戦", currentPersonality.dialogueStance, #selector(stanceSliderChanged(_:))),
+            ("態度", "ツン ← → デレ", currentPersonality.attitude, #selector(attitudeSliderChanged(_:))),
+        ]
+
+        var sliders: [NSSlider] = []
+        var valueLabels: [NSTextField] = []
+        var columns: [NSView] = []
+
+        for (title, hint, value, action) in sliderData {
+            let col = NSView()
+            col.translatesAutoresizingMaskIntoConstraints = false
+            sliderContainer.addSubview(col)
+            columns.append(col)
+
+            // タイトルラベル
+            let titleLabel = NSTextField(labelWithString: title)
+            titleLabel.translatesAutoresizingMaskIntoConstraints = false
+            titleLabel.font = labelFont
+            titleLabel.textColor = valueColor
+            titleLabel.alignment = .center
+            col.addSubview(titleLabel)
+
+            // スライダー
+            let slider = NSSlider(value: Double(value), minValue: 0.0, maxValue: 1.0,
+                                  target: self, action: action)
+            slider.translatesAutoresizingMaskIntoConstraints = false
+            slider.controlSize = .small
+            slider.isContinuous = true
+            col.addSubview(slider)
+            sliders.append(slider)
+
+            // ヒントラベル
+            let hintLabel = NSTextField(labelWithString: hint)
+            hintLabel.translatesAutoresizingMaskIntoConstraints = false
+            hintLabel.font = NSFont.systemFont(ofSize: 8)
+            hintLabel.textColor = labelColor
+            hintLabel.alignment = .center
+            col.addSubview(hintLabel)
+
+            // 値ラベル
+            let valLabel = NSTextField(labelWithString: String(format: "%.0f%%", value * 100))
+            valLabel.translatesAutoresizingMaskIntoConstraints = false
+            valLabel.font = valueFont
+            valLabel.textColor = labelColor
+            valLabel.alignment = .center
+            col.addSubview(valLabel)
+            valueLabels.append(valLabel)
+
+            NSLayoutConstraint.activate([
+                titleLabel.topAnchor.constraint(equalTo: col.topAnchor, constant: 2),
+                titleLabel.centerXAnchor.constraint(equalTo: col.centerXAnchor),
+
+                slider.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+                slider.leadingAnchor.constraint(equalTo: col.leadingAnchor, constant: 4),
+                slider.trailingAnchor.constraint(equalTo: col.trailingAnchor, constant: -4),
+
+                hintLabel.topAnchor.constraint(equalTo: slider.bottomAnchor, constant: 1),
+                hintLabel.centerXAnchor.constraint(equalTo: col.centerXAnchor),
+
+                valLabel.topAnchor.constraint(equalTo: hintLabel.bottomAnchor, constant: 0),
+                valLabel.centerXAnchor.constraint(equalTo: col.centerXAnchor),
+            ])
+        }
+
+        frequencySlider = sliders[0]
+        stanceSlider = sliders[1]
+        attitudeSlider = sliders[2]
+        frequencyValueLabel = valueLabels[0]
+        stanceValueLabel = valueLabels[1]
+        attitudeValueLabel = valueLabels[2]
+
+        // Auto mode toggle (右端に小さく)
+        autoModeToggle = NSButton(checkboxWithTitle: "自動", target: self, action: #selector(autoModeToggled(_:)))
+        autoModeToggle.translatesAutoresizingMaskIntoConstraints = false
+        autoModeToggle.font = NSFont.systemFont(ofSize: 9)
+        autoModeToggle.contentTintColor = valueColor
+        autoModeToggle.state = currentPersonality.autoMode ? .on : .off
+        sliderContainer.addSubview(autoModeToggle)
+
+        // 3カラムの横並びレイアウト
+        let col0 = columns[0], col1 = columns[1], col2 = columns[2]
+
+        NSLayoutConstraint.activate([
+            col0.topAnchor.constraint(equalTo: sliderContainer.topAnchor),
+            col0.bottomAnchor.constraint(equalTo: sliderContainer.bottomAnchor),
+            col0.leadingAnchor.constraint(equalTo: sliderContainer.leadingAnchor, constant: 2),
+
+            col1.topAnchor.constraint(equalTo: sliderContainer.topAnchor),
+            col1.bottomAnchor.constraint(equalTo: sliderContainer.bottomAnchor),
+            col1.leadingAnchor.constraint(equalTo: col0.trailingAnchor, constant: 2),
+            col1.widthAnchor.constraint(equalTo: col0.widthAnchor),
+
+            col2.topAnchor.constraint(equalTo: sliderContainer.topAnchor),
+            col2.bottomAnchor.constraint(equalTo: sliderContainer.bottomAnchor),
+            col2.leadingAnchor.constraint(equalTo: col1.trailingAnchor, constant: 2),
+            col2.widthAnchor.constraint(equalTo: col0.widthAnchor),
+            col2.trailingAnchor.constraint(equalTo: sliderContainer.trailingAnchor, constant: -28),
+
+            autoModeToggle.trailingAnchor.constraint(equalTo: sliderContainer.trailingAnchor, constant: -4),
+            autoModeToggle.topAnchor.constraint(equalTo: sliderContainer.topAnchor, constant: 4),
+        ])
+
+        updateSliderEnabled()
+    }
+
+    private func updateSliderEnabled() {
+        let isManual = !currentPersonality.autoMode
+        let alpha: CGFloat = isManual ? 1.0 : 0.5
+        frequencySlider.isEnabled = isManual
+        stanceSlider.isEnabled = isManual
+        attitudeSlider.isEnabled = isManual
+        frequencySlider.alphaValue = alpha
+        stanceSlider.alphaValue = alpha
+        attitudeSlider.alphaValue = alpha
+    }
+
+    @objc private func frequencySliderChanged(_ sender: NSSlider) {
+        currentPersonality.responseFrequency = Float(sender.doubleValue)
+        frequencyValueLabel.stringValue = String(format: "%.0f%%", sender.doubleValue * 100)
+        notifyPersonalityChanged()
+    }
+
+    @objc private func stanceSliderChanged(_ sender: NSSlider) {
+        currentPersonality.dialogueStance = Float(sender.doubleValue)
+        stanceValueLabel.stringValue = String(format: "%.0f%%", sender.doubleValue * 100)
+        notifyPersonalityChanged()
+    }
+
+    @objc private func attitudeSliderChanged(_ sender: NSSlider) {
+        currentPersonality.attitude = Float(sender.doubleValue)
+        attitudeValueLabel.stringValue = String(format: "%.0f%%", sender.doubleValue * 100)
+        notifyPersonalityChanged()
+    }
+
+    @objc private func autoModeToggled(_ sender: NSButton) {
+        currentPersonality.autoMode = sender.state == .on
+        updateSliderEnabled()
+        notifyPersonalityChanged()
+    }
+
+    private func notifyPersonalityChanged() {
+        currentPersonality.save()
+        onPersonalityChanged?(currentPersonality)
+    }
+
+    /// 外部からパーソナリティを更新（自動モード時の表示反映用）
+    func updatePersonalityDisplay(_ personality: YUiPersonality) {
+        currentPersonality = personality
+        frequencySlider?.doubleValue = Double(personality.responseFrequency)
+        stanceSlider?.doubleValue = Double(personality.dialogueStance)
+        attitudeSlider?.doubleValue = Double(personality.attitude)
+        autoModeToggle?.state = personality.autoMode ? .on : .off
+        frequencyValueLabel?.stringValue = String(format: "%.0f%%", personality.responseFrequency * 100)
+        stanceValueLabel?.stringValue = String(format: "%.0f%%", personality.dialogueStance * 100)
+        attitudeValueLabel?.stringValue = String(format: "%.0f%%", personality.attitude * 100)
+        updateSliderEnabled()
     }
 
     // MARK: - Bookmark Persistence

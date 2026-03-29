@@ -19,6 +19,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         captureManager?.logWindow = logWindowController
 
         yuiManager = YUiManager()
+
+        // パーソナリティスライダー連携
+        logWindowController?.onPersonalityChanged = { [weak self] personality in
+            self?.yuiManager?.personality = personality
+        }
+
         yuiManager?.onResponse = { [weak self] response, targetUser, likability in
             self?.logWindowController?.addEntry("🤖 YUi: \(response)", isYUi: true)
             self?.speakAsYUi(response, likability: likability)

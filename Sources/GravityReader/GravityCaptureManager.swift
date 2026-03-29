@@ -469,6 +469,13 @@ class GravityCaptureManager {
         // 参加者リストを解析（UIノイズ除外前の生テキストから）
         parseParticipantList(allTexts)
 
+        // デバッグ: 新着メッセージ検出用ログ
+        let newCount = allEntries.filter { $0.role == "AXGenericElement" && !spokenHistory.contains($0.text) }.count
+        if newCount > 0 {
+            NSLog("[GR] poll: total=\(allEntries.count), new=\(newCount)")
+            logWindow?.addEntry("📨 テキスト検出: \(newCount)件の新着")
+        }
+
         if isFirstPoll {
             // ベースライン: メッセージ(AXGenericElement)だけをspokenHistoryに登録
             // AXStaticText（ユーザー名）は毎回出るので登録しない
@@ -561,7 +568,10 @@ class GravityCaptureManager {
                     if isTTSEnabled {
                         speechManager.speak(text, forUser: user)
                     }
-                    yuiManager?.feedMessage("\(user): \(text)")
+                    // テキストコメントは[コメント]タグ付きで送る（音声と区別）
+                    let commentMsg = "\(user)[コメント]: \(text)"
+                    logWindow?.addEntry("💬 コメント→YUi: \(commentMsg)")
+                    yuiManager?.feedMessage(commentMsg)
                 }
             } else {
                 logWindow?.addEntry(text)
@@ -569,7 +579,9 @@ class GravityCaptureManager {
                     if isTTSEnabled {
                         speechManager.speak(text)
                     }
-                    yuiManager?.feedMessage(text)
+                    let commentMsg = "[コメント]: \(text)"
+                    logWindow?.addEntry("💬 コメント→YUi: \(commentMsg)")
+                    yuiManager?.feedMessage(commentMsg)
                 }
             }
 
