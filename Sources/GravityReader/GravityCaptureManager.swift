@@ -91,22 +91,22 @@ class GravityCaptureManager {
     /// ボイスコマンドパターン: "!voice ユーザー名 声の名前" や "！声　ぺんぽん　ずんだもん"
     /// 半角・全角スペース両対応
     private let voiceCommandPattern: NSRegularExpression = {
-        try! NSRegularExpression(pattern: #"^[!！](voice|声)[\s\u{3000}]+(.+?)[\s\u{3000}]+(.+)$"#)
+        try! NSRegularExpression(pattern: "^[!！](voice|声)[\\s\u{3000}]+(.+?)[\\s\u{3000}]+(.+)$")
     }()
 
     /// 読み辞書コマンド: "!読み 辛い つらい" or "!yomi C3PO シースリーピーオー"
     private let readingCommandPattern: NSRegularExpression = {
-        try! NSRegularExpression(pattern: #"^[!！](読み|yomi)[\s\u{3000}]+(.+?)[\s\u{3000}]+(.+)$"#)
+        try! NSRegularExpression(pattern: "^[!！](読み|yomi)[\\s\u{3000}]+(.+?)[\\s\u{3000}]+(.+)$")
     }()
 
     /// 読み辞書削除コマンド: "!読み削除 辛い" or "!yomi-del C3PO"
     private let readingDeletePattern: NSRegularExpression = {
-        try! NSRegularExpression(pattern: #"^[!！](読み削除|yomi-del)[\s\u{3000}]+(.+)$"#)
+        try! NSRegularExpression(pattern: "^[!！](読み削除|yomi-del)[\\s\u{3000}]+(.+)$")
     }()
 
     /// 読み辞書一覧: "!読み一覧" or "!yomi-list"
     private let readingListPattern: NSRegularExpression = {
-        try! NSRegularExpression(pattern: #"^[!！](読み一覧|yomi-list)[\s\u{3000}]*$"#)
+        try! NSRegularExpression(pattern: "^[!！](読み一覧|yomi-list)[\\s\u{3000}]*$")
     }()
 
     private func isUINoiseOrSystemMessage(_ text: String) -> Bool {

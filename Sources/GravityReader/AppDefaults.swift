@@ -2,7 +2,7 @@ import Foundation
 
 /// アプリ専用の UserDefaults suite（他アプリとのキー衝突を防ぐ）
 enum AppDefaults {
-    static let suite = UserDefaults(suiteName: "com.gravityreader.app")!
+    static let suite = UserDefaults(suiteName: "com.gravityreader.app.settings")!
 
     /// UserDefaults.standard から suite への一回限りマイグレーション
     static func migrateFromStandardIfNeeded() {
