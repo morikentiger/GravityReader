@@ -26,6 +26,43 @@ class YUiManager {
     /// 未処理の新着メッセージバッファ
     private var messageBuffer: [(timestamp: Date, text: String)] = []
 
+    // MARK: - 発言量トラッキング & 長文クールタイム
+
+    /// 相手の累積発言文字数（YUiが応答するたびにリセット）
+    private var userCharsSinceLastResponse: Int = 0
+    /// 最後に長文（60文字超）を返した時刻
+    private var lastLongResponseTime: Date?
+    /// 長文クールタイム（秒）— この間は短文のみ
+    private let longResponseCooldown: TimeInterval = 90
+    /// 長文を許可するユーザー発言量の閾値（文字数）
+    private let longResponseCharThreshold: Int = 200
+
+    /// 長文を返してよいか判定
+    private var canRespondLong: Bool {
+        // クールタイムが経過していること
+        if let last = lastLongResponseTime,
+           Date().timeIntervalSince(last) < longResponseCooldown {
+            return false
+        }
+        // 相手がそれなりに喋っていること
+        return userCharsSinceLastResponse >= longResponseCharThreshold
+    }
+
+    /// 相手の発言量に応じた応答長ガイド
+    private var responseLengthGuide: String {
+        if canRespondLong {
+            return "相手がたくさん話してくれたので、今回は2〜3文でしっかり返してOK。自分の経験や感想を交えて。"
+        }
+        let chars = userCharsSinceLastResponse
+        if chars < 30 {
+            return "超短文で返す。10〜20文字。「いいね」「わかる」「それな」くらい。"
+        } else if chars < 80 {
+            return "短めに1文で返す。20〜40文字。"
+        } else {
+            return "1〜2文で返す。30〜50文字。"
+        }
+    }
+
     // MARK: - すねる・甘えるシステム
 
     private var consecutiveYUiMessages: Int = 0
@@ -67,20 +104,21 @@ class YUiManager {
         let tempo = conversationTempo()
         let buffered = messageBuffer.count
 
-        let tempoMultiplier: Double
+        // 即応答モード: 相手が話し終わったら素早く返す
+        // 音声認識の区切り（1発言ごとにfeedMessage）を待ってから反応
         switch tempo {
         case .lively:
-            tempoMultiplier = 1.6
+            // 盛り上がってる時はやや待つ（他の人の発言を待つ余地）
+            return min(sliderBase * 0.4, 3.0)
         case .normal:
-            tempoMultiplier = 1.0
+            return min(sliderBase * 0.3, 2.0)
         case .slow:
-            tempoMultiplier = 0.6
+            // ゆっくりな会話でも即反応
+            return min(sliderBase * 0.2, 1.5)
         case .silent:
-            if buffered > 0 { return min(sliderBase, 2.0) }
-            tempoMultiplier = 1.0
+            if buffered > 0 { return 0.8 }
+            return min(sliderBase * 0.3, 2.0)
         }
-
-        return max(2.0, sliderBase * tempoMultiplier)
     }
 
     // MARK: - パーソナリティ自動調整
@@ -187,9 +225,10 @@ class YUiManager {
         - 「〜ですか？」→「〜なの？」、「〜しましょう」→「〜しよっか」
 
         ## 応答ルール（厳守）
-        - 1〜2文で返す。最大でも2文。3文以上は絶対禁止。句点「。」は最大2つまで
-        - 唯一の例外：自分の経験を語るときだけ3文までOK
-        - 30文字くらいがベスト。60文字を超えたら長すぎ
+        - デフォルトは超短文。1文で返す。10〜30文字がベスト
+        - テンポよく即レスする感じ。友達とのLINEみたいに
+        - 長く返していいのは【応答長ガイド】で指示された時だけ
+        - 【応答長ガイド】の指示に必ず従う。指示がなければ短文
         - 絵文字は使わない
         - 音声で読み上げるので、短くテンポよく
         - 今の話題に乗っかる。話題を変えない。関係ない話に飛ばさない
@@ -547,6 +586,9 @@ class YUiManager {
 
         lastMessageTime = Date()
 
+        // 発言量トラッキング（YUi以外の発言文字数を蓄積）
+        userCharsSinceLastResponse += messageContent.count
+
         // ユーザーが喋った → すねカウンターリセット
         if consecutiveYUiMessages > 0 {
             let wasLevel = lonelinessLevel
@@ -821,6 +863,14 @@ class YUiManager {
                 self.memoryManager.myResponseHistory.removeFirst()
             }
             self.consecutiveYUiMessages += 1
+
+            // 長文トラッキング: 60文字超なら長文クールタイム開始
+            if fullText.count > 60 {
+                self.lastLongResponseTime = Date()
+            }
+            // 発言量リセット（YUiが応答したので次の蓄積を開始）
+            self.userCharsSinceLastResponse = 0
+
             let loneEmoji = ["😊", "😏", "😤", "🥺", "😴"][min(self.lonelinessLevel, 4)]
             self.onLog?("\(loneEmoji) すねレベル: \(self.lonelinessLevel)（連続\(self.consecutiveYUiMessages)回）")
 
@@ -952,6 +1002,9 @@ class YUiManager {
         let effectivePersonality = autoAdjustedPersonality(tempo: tempo, topicType: topicType)
         parts.append(effectivePersonality.promptModifier)
 
+        // 応答長ガイド（発言量に応じた動的制御）
+        parts.append("【応答長ガイド（最優先で従う）】\n\(responseLengthGuide)")
+
         return parts.joined(separator: "\n\n")
     }
 
@@ -979,9 +1032,7 @@ class YUiManager {
         }
 
         let userMsg = """
-            以下は音声ルームのみんなの会話です。
-            場の空気を読んで、一番自然な雑談の返しをしてください。
-            傾聴・ツッコミ・深掘り・話題提供の中から、今の流れに合うものを選んで。
+            音声ルームの会話です。テンポよく自然に返して。【応答長ガイド】に必ず従うこと。
 
             \(context)
             """
