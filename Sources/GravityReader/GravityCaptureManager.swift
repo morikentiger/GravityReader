@@ -665,14 +665,11 @@ class GravityCaptureManager {
         let prevSet = Set(currentSpeakers)
         let newSet = Set(speakers)
         if prevSet != newSet {
-            if speakers.isEmpty && !currentSpeakers.isEmpty {
-                logWindow?.addEntry("🔇 発話終了")
-            } else if !speakers.isEmpty {
-                logWindow?.addEntry("🔊 発話中: \(speakers.joined(separator: ", "))")
+            // 名前付き話者がいる場合のみログ（スロット番号のみは省略）
+            let named = speakers.filter { !$0.hasPrefix("スロット") }
+            if !named.isEmpty && named != currentSpeakers.filter({ !$0.hasPrefix("スロット") }) {
+                logWindow?.addEntry("🔊 発話中: \(named.joined(separator: ", "))")
             }
-            // デバッグ: 全スロットの状態をログ
-            let stateStr = slots.map { "[\($0.slotIndex):\($0.buttonDesc)=\($0.isSpeaking ? "🔊" : "🔇")]" }.joined(separator: " ")
-            logWindow?.addEntry("🎚 スロット状態: \(stateStr)")
         }
         currentSpeakers = speakers
     }
