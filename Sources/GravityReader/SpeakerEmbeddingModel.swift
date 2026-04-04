@@ -377,7 +377,11 @@ class SpeakerEmbeddingModel {
     private func runInference(model: MLModel, features: [Float]) -> [Float]? {
         let shape = [1, SpeakerEmbeddingModel.featTimeDim, SpeakerEmbeddingModel.nMels] as [NSNumber]
 
-        guard let multiArray = try? MLMultiArray(shape: shape, dataType: .float32) else {
+        let multiArray: MLMultiArray
+        do {
+            multiArray = try MLMultiArray(shape: shape, dataType: .float32)
+        } catch {
+            NSLog("[SpeakerEmbedding] MLMultiArray作成エラー: \(error)")
             return nil
         }
 
@@ -387,9 +391,12 @@ class SpeakerEmbeddingModel {
             ptr[i] = features[i]
         }
 
-        let provider = try? MLDictionaryFeatureProvider(dictionary: ["features": MLFeatureValue(multiArray: multiArray)])
-        guard let provider = provider,
-              let output = try? model.prediction(from: provider) else {
+        let output: MLFeatureProvider
+        do {
+            let provider = try MLDictionaryFeatureProvider(dictionary: ["features": MLFeatureValue(multiArray: multiArray)])
+            output = try model.prediction(from: provider)
+        } catch {
+            NSLog("[SpeakerEmbedding] CoreML推論エラー: \(error)")
             return nil
         }
 

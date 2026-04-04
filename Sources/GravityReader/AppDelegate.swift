@@ -1,7 +1,7 @@
 import AppKit
 import AVFoundation
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+public class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarController: StatusBarController?
     private var captureManager: GravityCaptureManager?
     private var logWindowController: LogWindowController?
@@ -10,7 +10,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var roomTranscription: RoomTranscriptionManager?
     private var preferencesController: PreferencesWindowController?
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    public func applicationDidFinishLaunching(_ notification: Notification) {
+        AppDefaults.migrateFromStandardIfNeeded()
         NSApp.setActivationPolicy(.accessory)
 
         logWindowController = LogWindowController()
@@ -364,7 +365,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         check()
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    public func applicationWillTerminate(_ notification: Notification) {
         yuiManager?.flushAllMemory()
         roomTranscription?.stop()
     }

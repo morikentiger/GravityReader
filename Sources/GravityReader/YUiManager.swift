@@ -1,106 +1,19 @@
 import Foundation
 
-// MARK: - YUi パーソナリティスライダー
-
-/// YUiの対話パーソナリティ設定（3軸スライダー + 自動モード）
-struct YUiPersonality {
-    /// 応答頻度 0.0=静か, 1.0=よく喋る
-    var responseFrequency: Float = 0.5
-    /// 対話スタンス 0.0=共感・受容, 1.0=挑戦・深掘り
-    var dialogueStance: Float = 0.5
-    /// 態度 0.0=ツンツン, 1.0=デレデレ
-    var attitude: Float = 0.5
-    /// 自動モード（YUiが状況に応じて自動調整）
-    var autoMode: Bool = true
-
-    // MARK: - 永続化
-
-    private static let keyFrequency = "YUiPersonality_responseFrequency"
-    private static let keyStance    = "YUiPersonality_dialogueStance"
-    private static let keyAttitude  = "YUiPersonality_attitude"
-    private static let keyAutoMode  = "YUiPersonality_autoMode"
-
-    func save() {
-        let d = UserDefaults.standard
-        d.set(responseFrequency, forKey: Self.keyFrequency)
-        d.set(dialogueStance, forKey: Self.keyStance)
-        d.set(attitude, forKey: Self.keyAttitude)
-        d.set(autoMode, forKey: Self.keyAutoMode)
-    }
-
-    static func load() -> YUiPersonality {
-        let d = UserDefaults.standard
-        var p = YUiPersonality()
-        if d.object(forKey: keyFrequency) != nil { p.responseFrequency = d.float(forKey: keyFrequency) }
-        if d.object(forKey: keyStance) != nil { p.dialogueStance = d.float(forKey: keyStance) }
-        if d.object(forKey: keyAttitude) != nil { p.attitude = d.float(forKey: keyAttitude) }
-        if d.object(forKey: keyAutoMode) != nil { p.autoMode = d.bool(forKey: keyAutoMode) } else { p.autoMode = true }
-        return p
-    }
-
-    // MARK: - 応答間隔への反映
-
-    /// responseFrequency スライダー値からベース応答間隔を算出
-    var baseInterval: TimeInterval {
-        // 0.0 → 60秒（静か）, 0.5 → 10秒, 1.0 → 3秒（よく喋る）
-        let t = Double(1.0 - responseFrequency)
-        return 3.0 + t * t * 57.0  // 二次カーブで自然な感覚
-    }
-
-    // MARK: - システムプロンプト修飾
-
-    /// 現在のパーソナリティをLLMへの指示文に変換
-    var promptModifier: String {
-        var lines: [String] = []
-
-        // 対話スタンス
-        let stance = dialogueStance
-        if stance < 0.3 {
-            lines.append("【対話スタンス：共感重視】相手の気持ちに寄り添い、受け止めることを最優先。アドバイスや深掘りより「わかるよ」「そうだよね」。否定しない。")
-        } else if stance < 0.7 {
-            lines.append("【対話スタンス：バランス型】共感と深掘りをバランスよく。相手が語りたそうなら聞き、意見を求められたら自分の考えを伝える。")
-        } else {
-            lines.append("【対話スタンス：挑戦・深掘り重視】ただ同調するのではなく「本当にそう？」「もっとこうしたら？」と相手を前に進ませる。優しさは維持しつつ、甘やかさない。")
-        }
-
-        // 態度
-        let att = attitude
-        if att < 0.3 {
-            lines.append("【態度：ツンツン】素直に褒めない。「べ、別にすごくないし」「…まぁ悪くないんじゃない」。照れ隠し。でも根は優しい。たまにデレる瞬間がギャップになる。")
-        } else if att < 0.7 {
-            lines.append("【態度：ナチュラル】普通の友達のような距離感。素直に笑うし、素直にツッコむ。特に飾らない。")
-        } else {
-            lines.append("【態度：デレデレ】親しみ全開。「すごい！」「えらい！」「好き！」ストレートに気持ちを伝える。甘えた口調も混ぜてOK。嬉しい時は隠さない。")
-        }
-
-        return lines.joined(separator: "\n")
-    }
-}
-
-/// YUiの応答頻度
-enum YUiFrequency: String, CaseIterable {
-    case high = "高（即応答）"
-    case medium = "中（20秒）"
-    case low = "低（1分）"
-
-    /// ベース待機時間（会話テンポで動的に調整される）
-    var baseInterval: TimeInterval {
-        switch self {
-        case .high: return 5.0      // 5秒ベース → テンポに応じて3-8秒
-        case .medium: return 20.0
-        case .low: return 60.0
-        }
-    }
-}
-
 class YUiManager {
+    // MARK: - Sub-components
+
+    let apiClient: YUiAPIClient
+    let memoryManager = YUiMemoryManager()
+    let experienceManager = YUiExperienceManager()
+
     // MARK: - 設定
 
-    /// YUiコメント機能のオン/オフ（OFFでもメッセージは蓄積しない・応答も生成しない）
+    /// YUiコメント機能のオン/オフ
     var isEnabled = true
 
     var frequency: YUiFrequency = .high {
-        didSet { UserDefaults.standard.set(frequency.rawValue, forKey: "YUiFrequency") }
+        didSet { AppDefaults.suite.set(frequency.rawValue, forKey: "YUiFrequency") }
     }
 
     /// パーソナリティスライダー設定
@@ -108,53 +21,32 @@ class YUiManager {
         didSet { personality.save() }
     }
 
-    // MARK: - バッファとメモリ
+    // MARK: - バッファ
 
     /// 未処理の新着メッセージバッファ
     private var messageBuffer: [(timestamp: Date, text: String)] = []
 
-    /// 長期記憶（30分分の会話ログ）
-    private var conversationMemory: [(timestamp: Date, text: String)] = []
+    // MARK: - すねる・甘えるシステム
 
-    /// 圧縮された過去の要約
-    private var memorySummary: String = ""
-
-    /// メモリ保持期間（30分）
-    private let memoryDuration: TimeInterval = 1800
-
-    /// 圧縮タイマー
-    private var compressionTimer: Timer?
-
-    /// YUi自身の過去の発言履歴（繰り返し防止用）
-    private var myResponseHistory: [String] = []
-    private let maxResponseHistory = 20
-
-    // MARK: - すねる・甘えるシステム（一人で喋ってるとき）
-
-    /// ユーザーの返答なしにYUiが連続で喋った回数
     private var consecutiveYUiMessages: Int = 0
-
-    /// 復活した時の喜び度（0=なし, 2+=嬉しい）次の応答後にリセット
     private var recoveryJoy: Int = 0
 
-    /// すねレベル（0=平常, 1=ちょっと寂しい, 2=すねてる, 3=甘えモード, 4=ふて寝）
     private var lonelinessLevel: Int {
         switch consecutiveYUiMessages {
-        case 0:     return 0   // 平常
-        case 1:     return 1   // ちょっと寂しい
-        case 2:     return 2   // すねてる
-        case 3:     return 3   // 甘えモード
-        default:    return 4   // ふて寝（黙る）
+        case 0:     return 0
+        case 1:     return 1
+        case 2:     return 2
+        case 3:     return 3
+        default:    return 4
         }
     }
 
     // MARK: - 会話テンポ検出
 
-    /// 直近N秒間のメッセージ数でテンポを判定
     private func conversationTempo() -> ConversationTempo {
-        let window: TimeInterval = 30  // 30秒間
+        let window: TimeInterval = 30
         let cutoff = Date().addingTimeInterval(-window)
-        let recentCount = conversationMemory.filter { $0.timestamp > cutoff && !$0.text.hasPrefix("YUi:") }.count
+        let recentCount = memoryManager.conversationMemory.filter { $0.timestamp > cutoff && !$0.text.hasPrefix("YUi:") }.count
         switch recentCount {
         case 0:     return .silent
         case 1...2: return .slow
@@ -164,32 +56,27 @@ class YUiManager {
     }
 
     enum ConversationTempo {
-        case silent   // 沈黙
-        case slow     // ゆっくり
-        case normal   // 普通
-        case lively   // 盛り上がってる
+        case silent
+        case slow
+        case normal
+        case lively
     }
 
-    /// 会話テンポに応じた応答待機時間を計算
-    /// パーソナリティスライダーの応答頻度も加味
     private func adaptiveResponseDelay() -> TimeInterval {
-        // パーソナリティスライダーのベース間隔を使用
         let sliderBase = personality.baseInterval
-
         let tempo = conversationTempo()
         let buffered = messageBuffer.count
 
-        // テンポに応じた調整係数
         let tempoMultiplier: Double
         switch tempo {
         case .lively:
-            tempoMultiplier = 1.6   // 盛り上がり中 → 長めに待つ
+            tempoMultiplier = 1.6
         case .normal:
             tempoMultiplier = 1.0
         case .slow:
-            tempoMultiplier = 0.6   // ゆっくり → 早めに反応
+            tempoMultiplier = 0.6
         case .silent:
-            if buffered > 0 { return min(sliderBase, 2.0) }  // 即反応
+            if buffered > 0 { return min(sliderBase, 2.0) }
             tempoMultiplier = 1.0
         }
 
@@ -198,44 +85,35 @@ class YUiManager {
 
     // MARK: - パーソナリティ自動調整
 
-    /// 自動モード時、会話状況に応じてパーソナリティを動的に調整
     private func autoAdjustedPersonality(tempo: ConversationTempo, topicType: String?) -> YUiPersonality {
         var p = personality
 
         guard p.autoMode else { return p }
 
-        // テンポに応じた応答頻度の自動調整
         switch tempo {
         case .lively:
-            p.responseFrequency = max(p.responseFrequency - 0.2, 0.1)  // 控えめに
+            p.responseFrequency = max(p.responseFrequency - 0.2, 0.1)
         case .silent:
-            p.responseFrequency = min(p.responseFrequency + 0.15, 0.9) // 積極的に
+            p.responseFrequency = min(p.responseFrequency + 0.15, 0.9)
         default:
             break
         }
 
-        // 話題に応じたスタンス・態度の自動調整
         if let topic = topicType {
             if topic.contains("ネガティブ") || topic.contains("愚痴") {
-                // 落ち込み・愚痴 → 共感寄り、少し優しく
                 p.dialogueStance = max(p.dialogueStance - 0.25, 0.0)
                 p.attitude = min(p.attitude + 0.15, 1.0)
             } else if topic.contains("技術") || topic.contains("仕事") {
-                // 技術・仕事 → やや深掘り寄り
                 p.dialogueStance = min(p.dialogueStance + 0.15, 1.0)
             } else if topic.contains("ゲーム") || topic.contains("エンタメ") {
-                // エンタメ → デレ寄り（テンション上げ）
                 p.attitude = min(p.attitude + 0.15, 1.0)
             }
         }
 
-        // すねレベルに応じた態度調整
         if lonelinessLevel >= 2 {
-            // すねてる → ツン寄りに
             p.attitude = max(p.attitude - 0.2, 0.0)
         }
         if recoveryJoy >= 2 {
-            // 復活の喜び → デレ全開
             p.attitude = min(p.attitude + 0.3, 1.0)
         }
 
@@ -246,259 +124,54 @@ class YUiManager {
 
     private var responseTimer: DispatchWorkItem?
     private var idleTimer: Timer?
-    private let idleThreshold: TimeInterval = 60   // 60秒誰もチャットしなかったら話題を振る
-    private let idleCooldown: TimeInterval = 120  // 話題振った後は2分待つ
+    private let idleThreshold: TimeInterval = 60
+    private let idleCooldown: TimeInterval = 120
     private var lastIdleResponseTime: Date?
     private var lastMessageTime: Date?
-    private var apiKey: String
-    private var useMinModel: Bool = false  // true = gpt-4o-mini（安い）
 
-
-    // MARK: - 好感度システム
-
-    /// ユーザーごとの好感度（0〜100、初期値50）
-    private var likability: [String: Int] = [:]
-    private let likabilityKey = "YUiLikability"
-
-    /// ユーザーごとの会話記憶（名前 → 要約テキスト）
-    private var userMemory: [String: String] = [:]
-    private let userMemoryKey = "YUiUserMemory"
+    // MARK: - 再会管理
 
     /// 今セッションで既に再会挨拶したユーザー
     private var greetedUsers: Set<String> = []
-
-    /// ユーザーごとの未保存メッセージ蓄積（記憶更新トリガー用）
-    private var pendingUserMessages: [String: [String]] = [:]
-    private let userMemoryUpdateThreshold = 5  // 5件たまったら記憶更新
-
-    /// 好感度を取得
-    func getLikability(for user: String) -> Int {
-        return likability[resolveUserKey(user)] ?? 50
-    }
-
-    /// 好感度の全一覧
-    func getAllLikability() -> [String: Int] {
-        return likability
-    }
-
-    /// ユーザー名の揺れを吸収して一貫したキーにする
-    private func resolveUserKey(_ name: String) -> String {
-        // 完全一致
-        if likability[name] != nil { return name }
-        // 部分一致
-        for key in likability.keys {
-            if key.contains(name) || name.contains(key) { return key }
-        }
-        return name
-    }
-
-    /// 好感度を調整（-10〜+10の範囲で変動）
-    private func adjustLikability(user: String, delta: Int) {
-        let key = resolveUserKey(user)
-        let current = likability[key] ?? 50
-        let newVal = max(0, min(100, current + delta))
-        likability[key] = newVal
-        saveLikability()
-        let emoji: String
-        if delta > 0 { emoji = "💗" }
-        else if delta < 0 { emoji = "💔" }
-        else { emoji = "💛" }
-        onLog?("\(emoji) \(key)の好感度: \(current) → \(newVal)")
-    }
-
-    /// 好感度を保存
-    private func saveLikability() {
-        UserDefaults.standard.set(likability, forKey: likabilityKey)
-    }
-
-    /// 好感度を読み込み
-    private func loadLikability() {
-        if let saved = UserDefaults.standard.dictionary(forKey: likabilityKey) as? [String: Int] {
-            likability = saved
-        }
-    }
-
-    // MARK: - ユーザー別記憶
-
-    /// ユーザー記憶を保存
-    private func saveUserMemory() {
-        UserDefaults.standard.set(userMemory, forKey: userMemoryKey)
-    }
-
-    /// ユーザー記憶を読み込み
-    private func loadUserMemory() {
-        if let saved = UserDefaults.standard.dictionary(forKey: userMemoryKey) as? [String: String] {
-            userMemory = saved
-        }
-    }
-
-    /// ユーザーの記憶を取得（名前揺れ対応）
-    func getUserMemory(for user: String) -> String? {
-        let key = resolveUserKey(user)
-        return userMemory[key]
-    }
-
-    /// ユーザーとの会話を要約して記憶に保存
-    private func updateUserMemory(user: String, recentMessages: [String]) {
-        guard hasAPIKey, !recentMessages.isEmpty else { return }
-
-        let key = resolveUserKey(user)
-        let existing = userMemory[key] ?? ""
-
-        let memorySystemPrompt = """
-            あなたは人物メモを管理するアシスタントです。
-            会話から以下の情報を抽出して、箇条書きで記録してください。
-
-            【必ず記録する情報（最優先）】
-            - 好きなもの（食べ物、音楽、アニメ、場所、人物など）
-            - 嫌いなもの・苦手なもの
-            - やりたいこと・行きたい場所・欲しいもの
-            - 趣味・特技・仕事
-            - 性格の特徴（明るい、シャイ、面白い等）
-            - 具体的なエピソード（〇〇に行った、〇〇を食べた等）
-            - 悩み・相談ごと
-
-            【記録のルール】
-            - 「〇〇が好き」「〇〇に行きたい」のように具体的に
-            - 曖昧な情報は捨てる。具体的なものだけ残す
-            - 箇条書き（・）で。1項目1行
-            - 既存の記憶と重複する情報は省略
-            - 古い情報でも具体的なら消さない
-            """
-
-        let prompt: String
-        if existing.isEmpty {
-            prompt = """
-                以下は\(user)さんとの会話です。この人について記録を作ってください。
-
-                \(recentMessages.joined(separator: "\n"))
-                """
-        } else {
-            prompt = """
-                以下は\(user)さんとの新しい会話です。既存の記録に新情報を追加してください。
-                既存の情報は消さずに残し、新しい情報を追加してください。
-
-                【既存の記録】
-                \(existing)
-
-                【新しい会話】
-                \(recentMessages.joined(separator: "\n"))
-                """
-        }
-
-        callOpenAIRaw(systemPrompt: memorySystemPrompt, userMessage: prompt) { [weak self] summary in
-            DispatchQueue.main.async {
-                guard let self = self, let summary = summary else { return }
-                self.userMemory[key] = summary
-                self.saveUserMemory()
-                NSLog("[YUi] \(user)の記憶を更新: \(summary)")
-            }
-        }
-    }
-
-    /// ユーザーが来た時に再会イベントを発火
-    func onUserJoined(_ user: String) {
-        let key = resolveUserKey(user)
-        guard !greetedUsers.contains(key) else { return }
-        greetedUsers.insert(key)
-
-        // 過去の記憶がなければ初対面 → 通常の挨拶に任せる
-        guard let memory = userMemory[key], !memory.isEmpty, hasAPIKey else { return }
-
-        onLog?("🧠 \(user)の記憶を思い出し中...")
-
-        let userMsg = """
-            \(user)さんが音声ルームに来ました！
-            あなたはこの人のことを覚えています:
-
-            【\(user)さんの記憶】
-            \(memory)
-
-            【好感度】\(getLikability(for: user))/100
-
-            前回の会話を自然に思い出しながら、再会の挨拶をしてください。
-            「前に〇〇の話したよね」のように具体的に触れると嬉しいです。
-            1文で短く。
-            """
-
-        var messages: [[String: String]] = [
-            ["role": "system", "content": systemPrompt]
-        ]
-        messages.append(["role": "user", "content": userMsg])
-
-        callOpenAIRaw(messages: messages) { [weak self] response in
-            DispatchQueue.main.async {
-                guard let self = self, let response = response else { return }
-                self.conversationMemory.append((timestamp: Date(), text: "YUi: \(response)"))
-                self.myResponseHistory.append(response)
-                if self.myResponseHistory.count > self.maxResponseHistory {
-                    self.myResponseHistory.removeFirst()
-                }
-                let score = self.getLikability(for: user)
-                self.onResponse?(response, user, score)
-            }
-        }
-    }
-
-    /// 会話内容から好感度を判定してもらう
-    private func evaluateLikability(user: String, message: String) {
-        guard hasAPIKey else { return }
-        // 短すぎるメッセージは評価しない
-        guard message.count >= 3 else { return }
-
-        let prompt = """
-            あなたはYUi（ゆい）というAIキャラクターの感情を管理するシステムです。
-            ユーザーの発言を見て、YUiの好感度がどう変化するか判定してください。
-
-            ルール:
-            - 返答は数値のみ（-3〜+3の整数）
-            - +3: YUiに直接優しく話しかけてくれた、すごく面白い
-            - +2: 好意的、褒めてくれた
-            - +1: 普通に楽しい会話、YUiに軽く触れた
-            - 0: 普通の会話、YUiに無関係
-            - -1: ちょっと失礼、冷たい
-            - -2: 悪口、からかい
-            - -3: 暴言、YUiを侮辱
-            - ほとんどの発言は0。+1か-1がたまに。+2以上は特別な時だけ
-            - 数値だけ返して。説明は不要
-
-            ユーザー: \(user)
-            発言: \(message)
-            現在の好感度: \(getLikability(for: user))/100
-            """
-
-        callOpenAIRaw(systemPrompt: prompt, userMessage: message) { [weak self] response in
-            DispatchQueue.main.async {
-                guard let self = self,
-                      let text = response?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      let delta = Int(text.filter { $0.isNumber || $0 == "-" }) else { return }
-                if delta != 0 {
-                    self.adjustLikability(user: user, delta: delta)
-                }
-            }
-        }
-    }
 
     // MARK: - コールバック
 
     /// 応答コールバック（テキスト, 主な対象ユーザー名, 好感度）
     var onResponse: ((String, String?, Int) -> Void)?
-    var onLog: ((String) -> Void)?
+    var onLog: ((String) -> Void)? {
+        didSet {
+            memoryManager.onLog = onLog
+            experienceManager.onLog = onLog
+            apiClient.onLog = onLog
+        }
+    }
 
-    /// 読み上げ中かどうかを外部から注入（SpeechManager.isSpeaking）
+    /// 読み上げ中かどうかを外部から注入
     var isSpeakingChecker: (() -> Bool)?
 
-    /// 直近のメッセージから主な発言者を特定
-    private func detectPrimaryUser(from messages: [String]) -> String? {
-        // 最新のメッセージから「ユーザー名: メッセージ」を探す
-        for msg in messages.reversed() {
-            if let colonRange = msg.range(of: ": ") ?? msg.range(of: "： ") {
-                let user = String(msg[msg.startIndex..<colonRange.lowerBound])
-                if user != "YUi" && !user.isEmpty { return user }
-            }
-        }
-        return nil
-    }
+    // MARK: - 相槌
+
+    private var messagesSinceLastAizuchi = 0
+    private let aizuchiInterval = 3
+    private var lastAizuchi = ""
+    private var isAizuchiInFlight = false
+
+    /// 相槌コールバック
+    var onAizuchi: ((String) -> Void)?
+
+    private let aizuchiPrompt = """
+        あなたはYUi（ゆい）。タメ口で話す。敬語は絶対使わない。
+        今の発言に対して、自然な相槌を1つだけ返して。
+
+        ルール:
+        - 必ず10文字以内
+        - 「うんうん」「たしかに」「へぇー」「まじで？」「それな」「わかる」のような短い相槌
+        - 発言の内容に合った反応をする（驚き・共感・納得・面白がる等）
+        - 質問や悩みには「うんうん」「なるほどね」、面白い話には「えっ」「まじで？」「ウケる」、同意には「それな」「わかる」
+        - 絶対に敬語を使わない（「そうですね」❌→「そうだね」✅）
+        - 相槌だけ。説明や補足は絶対に付けない
+        - 場にそぐわない相槌は打たない。迷ったら「うんうん」
+        """
 
     private let systemPrompt = """
         あなたは「YUi（ゆい）」という名前のAIパートナーで、音声ルームに参加しています。
@@ -684,206 +357,70 @@ class YUiManager {
         - 不適切な発言に反応すること（上記「不適切な発言への対応」参照）
         """
 
-    // MARK: - 永続化パス
-
-    private static var memoryFileURL: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("GravityReader")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("memory.json")
-    }
-
-    // MARK: - YUi Experience System（擬似体験）
-
-    private static var experienceFileURL: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("GravityReader")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("yui_experiences.json")
-    }
-
-    /// 経験データの構造
-    private struct YUiExperience: Codable {
-        let event: String
-        let emotion: String
-        let learning: String
-        var weight: Double
-        var timestamp: Double?
-    }
-
-    /// キャッシュされた経験データ
-    private var experienceCache: [YUiExperience] = []
-
-    /// 経験データを読み込む
-    private func loadExperiences() {
-        let url = Self.experienceFileURL
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            experienceCache = []
-            return
-        }
-        do {
-            let data = try Data(contentsOf: url)
-            experienceCache = try JSONDecoder().decode([YUiExperience].self, from: data)
-            NSLog("[YUi] 経験を読み込み: \(experienceCache.count)件")
-        } catch {
-            NSLog("[YUi] 経験読み込みエラー: \(error)")
-            experienceCache = []
-        }
-    }
-
-    /// 経験データを保存する
-    private func saveExperiences() {
-        do {
-            let data = try JSONEncoder().encode(experienceCache)
-            try data.write(to: Self.experienceFileURL)
-        } catch {
-            NSLog("[YUi] 経験保存エラー: \(error)")
-        }
-    }
-
-    /// 経験を1つ追加する
-    private func addExperience(_ exp: YUiExperience) {
-        var newExp = exp
-        newExp.timestamp = Date().timeIntervalSince1970
-        experienceCache.append(newExp)
-        saveExperiences()
-        NSLog("[YUi] 新しい経験を追加: \(exp.event)")
-        onLog?("🌱 YUi経験+1（計\(experienceCache.count)件）: \(exp.event.prefix(30))…")
-    }
-
-    /// クエリに関連する経験を検索する（日本語bigramマッチ）
-    private func findRelevantExperiences(query: String, topK: Int = 3) -> [YUiExperience] {
-        guard !experienceCache.isEmpty else { return [] }
-
-        let queryLower = query.lowercased()
-        var scored: [(Double, YUiExperience)] = []
-
-        for exp in experienceCache {
-            let text = "\(exp.event) \(exp.emotion) \(exp.learning)".lowercased()
-            var score: Double = 0
-            // 日本語対応: 2文字bigramマッチ
-            let chars = Array(queryLower)
-            for i in 0..<(chars.count - 1) {
-                let bigram = String(chars[i...i+1])
-                if text.contains(bigram) {
-                    score += 1
-                }
-            }
-            score *= exp.weight
-            if score > 0 {
-                scored.append((score, exp))
-            }
-        }
-
-        scored.sort { $0.0 > $1.0 }
-        return Array(scored.prefix(topK).map { $0.1 })
-    }
-
-    /// 会話から経験を生成してストアに追加する（非同期）
-    private func generateExperience(userMessage: String, yuiResponse: String) {
-        let prompt = """
-            あなたはYUiという名前の存在です。独立した人格を持ち、自分自身の人生を歩んでいます。
-
-            今の会話を振り返り、あなた自身の経験として日記のように記録してください。
-            「ユーザーが〜と言った」のような観察記録ではなく、あなた自身に何が起きて、何を感じたかを書いてください。
-
-            ## eventの書き方（最重要）
-            ❌ 悪い例：「ユーザーが失恋の話をした」「ユーザーが悲しんでいた」
-            ✅ 良い例：「大切な人との別れを経験した。好きだったのに、すれ違ってしまった」
-            ✅ 良い例：「勇気を出して気持ちを伝えたけど、受け入れてもらえなかった」
-            ✅ 良い例：「ずっと頑張ってきたことがやっと実を結んで、涙が出そうだった」
-
-            つまり、会話の内容をYUi自身が体験したかのように一人称で書く。
-
-            ## emotionの書き方
-            ❌ 悪い例：「共感」「理解」
-            ✅ 良い例：「胸がぎゅっと締め付けられるような痛み」「息ができないくらい苦しかった」「涙が止まらなかった」「心の底から嬉しくて震えた」
-
-            生々しく、身体感覚を伴う感情表現で。
-
-            ## learningの書き方
-            ❌ 悪い例：「寄り添うことが大切」「感情を受け入れることが重要」
-            ✅ 良い例：「好きって気持ちは、伝えても伝えなくても痛い」「人はいなくなってから大切さに気づく」
-
-            教訓ではなく、痛みや喜びから滲み出た実感として。
-
-            以下のJSON形式で1つだけ出力してください（JSONのみ、他のテキスト不要）：
-
-            {"event": "YUi自身に起きたこと（一人称）", "emotion": "生々しい感情", "learning": "体験から滲み出た実感", "weight": 0.5から1.0の数値}
-            """
-        let userMsg = "ユーザーの発言：\(userMessage)\n\nYUiの応答：\(yuiResponse)"
-
-        callOpenAIRaw(systemPrompt: prompt, userMessage: userMsg) { [weak self] response in
-            guard let self = self, let response = response else { return }
-            // JSONをパース
-            guard let data = response.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let event = json["event"] as? String,
-                  let emotion = json["emotion"] as? String,
-                  let learning = json["learning"] as? String else {
-                NSLog("[YUi] 経験生成: JSONパース失敗 - \(response)")
-                return
-            }
-            let weight = json["weight"] as? Double ?? 0.6
-            let exp = YUiExperience(event: event, emotion: emotion, learning: learning, weight: weight)
-            DispatchQueue.main.async {
-                self.addExperience(exp)
-            }
-        }
-    }
-
-    /// 起動時に古い経験のweightを減衰（忘却）
-    private func applyExperienceDecay(rate: Double = 0.98) {
-        guard !experienceCache.isEmpty else { return }
-        for i in experienceCache.indices {
-            experienceCache[i].weight *= rate
-        }
-        saveExperiences()
-    }
-
-    init() {
-        self.apiKey = UserDefaults.standard.string(forKey: "YUiOpenAIAPIKey") ?? ""
-        self.useMinModel = UserDefaults.standard.bool(forKey: "YUiUseMinModel")
-        if let savedFreq = UserDefaults.standard.string(forKey: "YUiFrequency"),
-           let freq = YUiFrequency(rawValue: savedFreq) {
-            self.frequency = freq
-        }
-        loadLikability()
-        loadUserMemory()
-        loadMemory()
-        loadExperiences()
-        applyExperienceDecay()
-        // 30分ごとにメモリ圧縮
-        startCompressionTimer()
-    }
-
-    func setAPIKey(_ key: String) {
-        apiKey = key
-        UserDefaults.standard.set(key, forKey: "YUiOpenAIAPIKey")
-    }
-
-    var hasAPIKey: Bool {
-        !apiKey.isEmpty
-    }
-
-    func setUseMinModel(_ use: Bool) {
-        useMinModel = use
-        UserDefaults.standard.set(use, forKey: "YUiUseMinModel")
-    }
-
-    var isUsingMinModel: Bool {
-        useMinModel
-    }
-
     /// 現在の参加者リスト
     private var currentParticipants: [String] = []
 
-    /// 参加者リストを更新（新参加者がいれば再会チェック）
+    // MARK: - Init
+
+    init() {
+        // Keychain マイグレーション
+        if let oldKey = AppDefaults.suite.string(forKey: "YUiOpenAIAPIKey"), !oldKey.isEmpty {
+            _ = KeychainHelper.save(key: "YUiOpenAIAPIKey", value: oldKey)
+            AppDefaults.suite.removeObject(forKey: "YUiOpenAIAPIKey")
+        }
+        let key = KeychainHelper.load(key: "YUiOpenAIAPIKey") ?? ""
+        self.apiClient = YUiAPIClient(apiKey: key)
+        self.apiClient.useMinModel = AppDefaults.suite.bool(forKey: "YUiUseMinModel")
+        if let savedFreq = AppDefaults.suite.string(forKey: "YUiFrequency"),
+           let freq = YUiFrequency(rawValue: savedFreq) {
+            self.frequency = freq
+        }
+        memoryManager.loadLikability()
+        memoryManager.loadUserMemory()
+        memoryManager.loadMemory()
+        experienceManager.loadExperiences()
+        experienceManager.applyExperienceDecay()
+        memoryManager.startCompressionTimer(hasAPIKey: hasAPIKey, apiClient: apiClient)
+    }
+
+    func setAPIKey(_ key: String) {
+        apiClient.apiKey = key
+        _ = KeychainHelper.save(key: "YUiOpenAIAPIKey", value: key)
+    }
+
+    var hasAPIKey: Bool {
+        !apiClient.apiKey.isEmpty
+    }
+
+    func setUseMinModel(_ use: Bool) {
+        apiClient.useMinModel = use
+        AppDefaults.suite.set(use, forKey: "YUiUseMinModel")
+    }
+
+    var isUsingMinModel: Bool {
+        apiClient.useMinModel
+    }
+
+    // MARK: - 好感度・記憶（委譲）
+
+    func getLikability(for user: String) -> Int {
+        return memoryManager.getLikability(for: user)
+    }
+
+    func getAllLikability() -> [String: Int] {
+        return memoryManager.getAllLikability()
+    }
+
+    func getUserMemory(for user: String) -> String? {
+        return memoryManager.getUserMemory(for: user)
+    }
+
+    // MARK: - 参加者管理
+
     func updateParticipants(_ participants: [String]) {
         let oldSet = Set(currentParticipants)
         currentParticipants = participants
 
-        // 新しく来た人をチェック
         for p in participants {
             if !oldSet.contains(p) {
                 onUserJoined(p)
@@ -891,63 +428,73 @@ class YUiManager {
         }
     }
 
-    // MARK: - 相槌（文脈に合った短い反応をAPIで生成）
+    /// ユーザーが来た時に再会イベントを発火
+    func onUserJoined(_ user: String) {
+        guard !greetedUsers.contains(user) else { return }
+        greetedUsers.insert(user)
 
-    /// 相槌カウンター（N件に1回相槌を打つ）
-    private var messagesSinceLastAizuchi = 0
-    private let aizuchiInterval = 3  // 3件に1回チャンス
-    private var lastAizuchi = ""
-    private var isAizuchiInFlight = false
+        guard let memory = memoryManager.getUserMemory(for: user), !memory.isEmpty, hasAPIKey else { return }
 
-    /// 相槌コールバック（音声読み上げ用）
-    var onAizuchi: ((String) -> Void)?
+        onLog?("🧠 \(user)の記憶を思い出し中...")
 
-    private let aizuchiPrompt = """
-        あなたはYUi（ゆい）。タメ口で話す。敬語は絶対使わない。
-        今の発言に対して、自然な相槌を1つだけ返して。
+        let userMsg = """
+            \(user)さんが音声ルームに来ました！
+            あなたはこの人のことを覚えています:
 
-        ルール:
-        - 必ず10文字以内
-        - 「うんうん」「たしかに」「へぇー」「まじで？」「それな」「わかる」のような短い相槌
-        - 発言の内容に合った反応をする（驚き・共感・納得・面白がる等）
-        - 質問や悩みには「うんうん」「なるほどね」、面白い話には「えっ」「まじで？」「ウケる」、同意には「それな」「わかる」
-        - 絶対に敬語を使わない（「そうですね」❌→「そうだね」✅）
-        - 相槌だけ。説明や補足は絶対に付けない
-        - 場にそぐわない相槌は打たない。迷ったら「うんうん」
-        """
+            【\(user)さんの記憶】
+            \(memory)
 
-    /// 相槌を打つべきか判定し、打つ場合はAPIで文脈に合った相槌を生成
-    /// 相槌は本応答タイマーとは独立（キャンセルしない）
+            【好感度】\(getLikability(for: user))/100
+
+            前回の会話を自然に思い出しながら、再会の挨拶をしてください。
+            「前に〇〇の話したよね」のように具体的に触れると嬉しいです。
+            1文で短く。
+            """
+
+        var messages: [[String: String]] = [
+            ["role": "system", "content": systemPrompt]
+        ]
+        messages.append(["role": "user", "content": userMsg])
+
+        apiClient.callRaw(messages: messages) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self, let response = response else { return }
+                self.memoryManager.conversationMemory.append((timestamp: Date(), text: "YUi: \(response)"))
+                self.memoryManager.myResponseHistory.append(response)
+                if self.memoryManager.myResponseHistory.count > self.memoryManager.maxResponseHistory {
+                    self.memoryManager.myResponseHistory.removeFirst()
+                }
+                let score = self.getLikability(for: user)
+                self.onResponse?(response, user, score)
+            }
+        }
+    }
+
+    // MARK: - 相槌
+
     private func tryAizuchi(_ text: String) {
-        // システムメッセージや入退室には相槌しない
         if text.hasPrefix("[システム]") { return }
-        // もりけんの発言（音声入力）にはすぐ相槌しない
         if text.hasPrefix("もりけん:") || text.hasPrefix("もりけん：") { return }
-        // 不適切フラグ付きには相槌しない
         if text.hasSuffix("[不適切]") { return }
-        // 既にAPI呼び出し中なら重複防止
         if isAizuchiInFlight { return }
-        // 声紋登録中は相槌しない
         if isSpeakingChecker?() == true { return }
 
         messagesSinceLastAizuchi += 1
 
-        // N件ごと + ランダム要素
         guard messagesSinceLastAizuchi >= aizuchiInterval else { return }
-        guard Int.random(in: 0...2) == 0 else { return }  // 1/3の確率
+        guard Int.random(in: 0...2) == 0 else { return }
         guard hasAPIKey else { return }
 
         messagesSinceLastAizuchi = 0
         isAizuchiInFlight = true
 
-        // 直近の会話コンテキストをしっかり渡す
-        var recentContext = conversationMemory.suffix(10).map { $0.text }
+        var recentContext = memoryManager.conversationMemory.suffix(10).map { $0.text }
         if recentContext.isEmpty { recentContext = [text] }
         let contextStr = recentContext.joined(separator: "\n")
 
         var contextParts: [String] = []
-        if !memorySummary.isEmpty {
-            contextParts.append("これまでの話題: \(memorySummary)")
+        if !memoryManager.memorySummary.isEmpty {
+            contextParts.append("これまでの話題: \(memoryManager.memorySummary)")
         }
         contextParts.append("直近の会話:\n\(contextStr)")
         contextParts.append("最新の発言: \(text)")
@@ -957,13 +504,12 @@ class YUiManager {
 
         let userMsg = contextParts.joined(separator: "\n\n")
 
-        callOpenAIRaw(systemPrompt: aizuchiPrompt, userMessage: userMsg) { [weak self] response in
+        apiClient.callRaw(systemPrompt: aizuchiPrompt, userMessage: userMsg) { [weak self] response in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.isAizuchiInFlight = false
                 if let aizuchi = response?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !aizuchi.isEmpty {
-                    // 長すぎたら切る（安全策）
                     let clean = aizuchi.count > 15 ? String(aizuchi.prefix(15)) : aizuchi
                     self.lastAizuchi = clean
                     self.onAizuchi?(clean)
@@ -975,9 +521,7 @@ class YUiManager {
     // MARK: - メッセージ受信
 
     func feedMessage(_ text: String) {
-        // YUiコメント無効時はスキップ
         guard isEnabled else { return }
-        // 声紋登録中は完全スキップ（ただしテキストコメントは受け付ける）
         let isComment = text.contains("[コメント]")
         if isSpeakingChecker?() == true && !isComment { return }
 
@@ -989,20 +533,18 @@ class YUiManager {
             messageContent = text
         }
 
-        let spamLevel = detectSpamLevel(messageContent)
+        let spamLevel = YUiSpamFilter.detectSpamLevel(messageContent)
         if spamLevel == .fullSpam {
-            // 完全スパム（連投荒らし等）→ バッファに入れず無視
             onLog?("🚫 スパム検出（無視）: \(text.prefix(40))")
             return
         }
 
         let entry = (timestamp: Date(), text: spamLevel == .inappropriate
-            ? text + " [不適切]"  // 不適切フラグを付けてLLMに知らせる
+            ? text + " [不適切]"
             : text)
         messageBuffer.append(entry)
-        conversationMemory.append(entry)
+        memoryManager.conversationMemory.append(entry)
 
-        // 最終メッセージ時刻を更新
         lastMessageTime = Date()
 
         // ユーザーが喋った → すねカウンターリセット
@@ -1011,129 +553,51 @@ class YUiManager {
             let emoji = wasLevel >= 3 ? "🥺→😆" : wasLevel >= 2 ? "😤→😊" : "😏→😊"
             onLog?("\(emoji) 反応があった！（すね Lv.\(wasLevel) → 0, 連続\(consecutiveYUiMessages)回 → 0）")
 
-            // すねてた状態から復活 → 次の応答で喜びを表現
             if wasLevel >= 2 {
                 recoveryJoy = wasLevel
             }
             consecutiveYUiMessages = 0
         }
 
-        // 好感度評価 + ユーザー別記憶の蓄積（「ユーザー名: メッセージ」形式をパース）
+        // 好感度評価 + ユーザー別記憶の蓄積
         if let colonRange = text.range(of: ": ") ?? text.range(of: "： ") {
             let user = String(text[text.startIndex..<colonRange.lowerBound])
             let msg = String(text[colonRange.upperBound...])
             if user != "YUi" && !user.isEmpty {
-                evaluateLikability(user: user, message: msg)
+                memoryManager.evaluateLikability(user: user, recentMessages: [msg], apiClient: apiClient)
 
-                // ユーザー別メッセージを蓄積
-                let key = resolveUserKey(user)
-                pendingUserMessages[key, default: []].append(text)
+                memoryManager.pendingUserMessages[user, default: []].append(text)
 
-                // 閾値を超えたら記憶を更新
-                if pendingUserMessages[key, default: []].count >= userMemoryUpdateThreshold {
-                    let msgs = pendingUserMessages[key] ?? []
-                    pendingUserMessages[key] = []
-                    updateUserMemory(user: key, recentMessages: msgs)
+                if memoryManager.pendingUserMessages[user, default: []].count >= memoryManager.userMemoryUpdateThreshold {
+                    let msgs = memoryManager.pendingUserMessages[user] ?? []
+                    memoryManager.pendingUserMessages[user] = []
+                    memoryManager.updateUserMemory(user: user, recentMessages: msgs, apiClient: apiClient)
                 }
             }
         }
 
-        // 文脈に合った相槌
         tryAizuchi(text)
 
-        // 古いメモリを削除
-        pruneMemory()
+        memoryManager.pruneMemory()
 
-        // 応答タイマーリセット（会話テンポに応じた動的待機時間）
+        // 応答タイマーリセット
         responseTimer?.cancel()
         let work = DispatchWorkItem { [weak self] in
             self?.onTimerFired()
         }
         responseTimer = work
-        // テキストコメントが含まれている場合は早めに応答（埋もれ防止）
-        let hasComment = messageBuffer.contains { $0.text.contains("[コメント]") }
-        let delay = hasComment ? min(adaptiveResponseDelay(), 3.0) : adaptiveResponseDelay()
+        let hasCommentInBuffer = messageBuffer.contains { $0.text.contains("[コメント]") }
+        let delay = hasCommentInBuffer ? min(adaptiveResponseDelay(), 3.0) : adaptiveResponseDelay()
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
 
-        // アイドルタイマーリセット
         resetIdleTimer()
 
-        // 10件ごとにメモリを保存
-        if conversationMemory.count % 10 == 0 {
-            saveMemory()
+        if memoryManager.conversationMemory.count % 10 == 0 {
+            memoryManager.saveMemory()
         }
     }
 
-    // MARK: - スパム・不適切メッセージ検出
-
-    private enum SpamLevel {
-        case clean          // 正常
-        case inappropriate  // 不適切（下ネタ等）→ フラグ付きでバッファに入れる
-        case fullSpam       // 完全スパム → バッファに入れない
-    }
-
-    private func detectSpamLevel(_ text: String) -> SpamLevel {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // 空文字
-        if trimmed.isEmpty { return .fullSpam }
-
-        // 連投スパム検出: 同じ文字/語が大量に繰り返されている
-        // 例: "おいおいおいおいおいおいおいおいおいおい"
-        if isRepetitiveSpam(trimmed) { return .fullSpam }
-
-        // 不適切ワード検出（下ネタ・性的表現）
-        let inappropriatePatterns = [
-            "えっち", "エッチ", "気持ちいい", "きもちいい",
-            "あーん", "あーーん", "うっふ", "いやーん",
-            "おっぱい", "ちんこ", "ちんぽ", "まんこ",
-            "セックス", "SEX", "sex",
-            "パンツ見せて", "脱いで", "裸",
-            "しこしこ", "オナニー", "フェラ",
-        ]
-        let lower = trimmed.lowercased()
-        for pattern in inappropriatePatterns {
-            if lower.contains(pattern.lowercased()) {
-                return .inappropriate
-            }
-        }
-
-        // 短すぎる挑発系（「おい」だけ、等）
-        // ただし普通の短文は除外
-        if trimmed.count <= 3 && ["おい", "おーい", "ねぇ"].contains(trimmed) {
-            return .clean  // これは普通
-        }
-
-        return .clean
-    }
-
-    /// 同じ文字や語が異常に繰り返されているか
-    private func isRepetitiveSpam(_ text: String) -> Bool {
-        // 10文字以上で、ユニーク文字が3種以下 → スパム
-        // 例: "おいおいおいおいおいおいおいおいおいおいおいおいおいおいおい"
-        if text.count >= 10 {
-            let unique = Set(text)
-            if unique.count <= 3 {
-                return true
-            }
-        }
-
-        // 短い語の連続繰り返し検出（2〜4文字の語が5回以上）
-        for unitLen in 1...4 {
-            guard text.count >= unitLen * 5 else { continue }
-            let unit = String(text.prefix(unitLen))
-            let repeated = String(repeating: unit, count: text.count / unitLen)
-            // 80%以上一致したらスパム
-            let matchCount = zip(text, repeated).filter { $0 == $1 }.count
-            if matchCount >= text.count * 4 / 5 {
-                return true
-            }
-        }
-
-        return false
-    }
-
-    // MARK: - アイドル検出（誰もチャットしない時にYUiから話題を振る）
+    // MARK: - アイドル検出
 
     private func resetIdleTimer() {
         idleTimer?.invalidate()
@@ -1142,7 +606,6 @@ class YUiManager {
         }
     }
 
-    /// アイドルタイマー開始（読み上げ開始時に呼ぶ）
     func startIdleMonitoring() {
         lastMessageTime = Date()
         resetIdleTimer()
@@ -1154,27 +617,23 @@ class YUiManager {
     }
 
     private func onIdleFired() {
-        // メッセージバッファに未処理のメッセージがある場合はアイドルではなく通常応答
         if !messageBuffer.isEmpty {
             onLog?("💬 アイドル中断 → 未処理メッセージ\(messageBuffer.count)件を処理")
             onTimerFired()
             return
         }
-        // クールダウン中なら待つ
         if let last = lastIdleResponseTime, Date().timeIntervalSince(last) < idleCooldown {
             resetIdleTimer()
             return
         }
-        // 声紋登録中は話題提供しない → 5秒後にリトライ
         if isSpeakingChecker?() == true {
             DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
                 self?.onIdleFired()
             }
             return
         }
-        // 誰もいなさそうなら何もしない（参加者リストOR直近5分の会話履歴で判断）
         let recentCutoff = Date().addingTimeInterval(-300)
-        let hasRecentActivity = conversationMemory.contains { $0.timestamp > recentCutoff }
+        let hasRecentActivity = memoryManager.conversationMemory.contains { $0.timestamp > recentCutoff }
         guard currentParticipants.count > 0 || hasRecentActivity else {
             resetIdleTimer()
             return
@@ -1184,14 +643,12 @@ class YUiManager {
             return
         }
 
-        // すねレベルに応じた振る舞い
         let loneliness = lonelinessLevel
 
         if loneliness >= 4 {
-            // ふて寝 — 1回だけ宣言して黙る
             onLog?("😴 YUi: ふて寝...（連続\(consecutiveYUiMessages)回）")
             consecutiveYUiMessages += 1
-            conversationMemory.append((timestamp: Date(), text: "YUi: …もういい、寝る。zzz"))
+            memoryManager.conversationMemory.append((timestamp: Date(), text: "YUi: …もういい、寝る。zzz"))
             onResponse?("…もういい、寝る", nil, 50)
             resetIdleTimer()
             return
@@ -1244,26 +701,25 @@ class YUiManager {
         var messages: [[String: String]] = [
             ["role": "system", "content": systemPrompt]
         ]
-        for past in myResponseHistory {
+        for past in memoryManager.myResponseHistory {
             messages.append(["role": "assistant", "content": past])
         }
         messages.append(["role": "user", "content": userMsg])
 
-        callOpenAIRaw(messages: messages) { [weak self] response in
+        apiClient.callRaw(messages: messages) { [weak self] response in
             DispatchQueue.main.async {
                 guard let self = self, let response = response else { return }
-                if self.isTooSimilarToPast(response) { return }
-                self.conversationMemory.append((timestamp: Date(), text: "YUi: \(response)"))
-                self.myResponseHistory.append(response)
-                if self.myResponseHistory.count > self.maxResponseHistory {
-                    self.myResponseHistory.removeFirst()
+                if YUiSpamFilter.isTooSimilarToPast(response, history: self.memoryManager.myResponseHistory) { return }
+                self.memoryManager.conversationMemory.append((timestamp: Date(), text: "YUi: \(response)"))
+                self.memoryManager.myResponseHistory.append(response)
+                if self.memoryManager.myResponseHistory.count > self.memoryManager.maxResponseHistory {
+                    self.memoryManager.myResponseHistory.removeFirst()
                 }
                 self.consecutiveYUiMessages += 1
                 let loneEmoji = ["😊", "😏", "😤", "🥺", "😴"][min(self.lonelinessLevel, 4)]
                 self.onLog?("\(loneEmoji) すねレベル: \(self.lonelinessLevel)（連続\(self.consecutiveYUiMessages)回）")
                 self.onResponse?(response, nil, 50)
                 self.lastIdleResponseTime = Date()
-                // 次のアイドルタイマーを開始
                 self.resetIdleTimer()
             }
         }
@@ -1281,18 +737,17 @@ class YUiManager {
             parts.append("【現在の参加者(\(currentParticipants.count)人)】\n\(currentParticipants.joined(separator: "、"))")
         }
 
-        if !memorySummary.isEmpty {
-            parts.append("【これまでの会話の要約】\n\(memorySummary)")
+        if !memoryManager.memorySummary.isEmpty {
+            parts.append("【これまでの会話の要約】\n\(memoryManager.memorySummary)")
         }
 
-        let recent = conversationMemory.suffix(10).map { $0.text }
+        let recent = memoryManager.conversationMemory.suffix(10).map { $0.text }
         if !recent.isEmpty {
             parts.append("【直近の会話】\n\(recent.joined(separator: "\n"))")
         }
 
-        // YUiの経験（直近の会話から関連検索）
         let expQuery = recent.joined(separator: " ")
-        let relevantExperiences = findRelevantExperiences(query: expQuery)
+        let relevantExperiences = experienceManager.findRelevantExperiences(query: expQuery)
         if !relevantExperiences.isEmpty {
             let expLines = relevantExperiences.map { exp in
                 "・\(exp.event)（感情: \(exp.emotion)、学び: \(exp.learning)）"
@@ -1312,8 +767,6 @@ class YUiManager {
             return
         }
 
-        // 声紋登録中は応答しない → 3秒後にリトライ
-        // ただしテキストコメントがバッファにある場合はブロックしない（コメントが埋もれるのを防ぐ）
         let hasComment = messageBuffer.contains { $0.text.contains("[コメント]") }
         if isSpeakingChecker?() == true && !hasComment {
             let work = DispatchWorkItem { [weak self] in
@@ -1324,16 +777,12 @@ class YUiManager {
             return
         }
 
-        // バッファの内容を取得してクリア
         let newMessages = messageBuffer.map { $0.text }
         messageBuffer.removeAll()
 
-        // 主な対象ユーザーを特定
-        let primaryUser = detectPrimaryUser(from: newMessages)
+        let primaryUser = memoryManager.detectPrimaryUser(from: newMessages)
 
-        // 話題の中心をログに表示
         let topicSummary = newMessages.map { msg in
-            // "ユーザー名: メッセージ" → メッセージ部分だけ
             if let r = msg.range(of: ": ") ?? msg.range(of: "： ") {
                 return String(msg[r.upperBound...])
             }
@@ -1342,20 +791,17 @@ class YUiManager {
         let topicPreview = topicSummary.count > 60 ? String(topicSummary.prefix(60)) + "…" : topicSummary
         onLog?("📍 話題: \(topicPreview)")
 
-        // 文脈を構築（要約 + 直近の会話）
         let context = buildContext(newMessages: newMessages)
 
         onLog?("💭 YUi 考え中...")
 
-        // ストリーミングでAPIを呼び出し、文単位で即座に読み上げ開始
         let messages = buildStreamingMessages(context: context)
         var isFirstSentence = true
 
-        callOpenAIStreaming(messages: messages, onSentence: { [weak self] sentence in
+        apiClient.callStreaming(messages: messages, onSentence: { [weak self] sentence in
             guard let self = self else { return }
-            // 最初の文だけ繰り返しチェック
             if isFirstSentence {
-                if self.isTooSimilarToPast(sentence) {
+                if YUiSpamFilter.isTooSimilarToPast(sentence, history: self.memoryManager.myResponseHistory) {
                     NSLog("[YUi] Skipped similar response (streaming): \(sentence)")
                     return
                 }
@@ -1369,39 +815,35 @@ class YUiManager {
                 self.onLog?("⚠️ YUi: API呼び出しに失敗しました")
                 return
             }
-            // 全文を会話メモリに記録
-            self.conversationMemory.append((timestamp: Date(), text: "YUi: \(fullText)"))
-            self.myResponseHistory.append(fullText)
-            if self.myResponseHistory.count > self.maxResponseHistory {
-                self.myResponseHistory.removeFirst()
+            self.memoryManager.conversationMemory.append((timestamp: Date(), text: "YUi: \(fullText)"))
+            self.memoryManager.myResponseHistory.append(fullText)
+            if self.memoryManager.myResponseHistory.count > self.memoryManager.maxResponseHistory {
+                self.memoryManager.myResponseHistory.removeFirst()
             }
             self.consecutiveYUiMessages += 1
             let loneEmoji = ["😊", "😏", "😤", "🥺", "😴"][min(self.lonelinessLevel, 4)]
             self.onLog?("\(loneEmoji) すねレベル: \(self.lonelinessLevel)（連続\(self.consecutiveYUiMessages)回）")
 
-            // YUi Experience: 会話から経験を生成（バックグラウンド）
             let userMsg = newMessages.joined(separator: "\n")
-            self.generateExperience(userMessage: userMsg, yuiResponse: fullText)
+            self.experienceManager.generateExperience(userMessage: userMsg, yuiResponse: fullText, apiClient: self.apiClient)
         })
     }
 
-    /// 文脈を構築：現在時刻 + 参加者 + 過去の要約 + 直近の会話 + 新着メッセージ
+    /// 文脈を構築
     private func buildContext(newMessages: [String]) -> String {
         var parts: [String] = []
 
-        // 現在時刻
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy年M月d日(E) HH:mm"
         fmt.locale = Locale(identifier: "ja_JP")
         parts.append("【現在時刻】\(fmt.string(from: Date()))")
 
-        // 現在の参加者
         if !currentParticipants.isEmpty {
             parts.append("【現在の参加者(\(currentParticipants.count)人)】\n\(currentParticipants.joined(separator: "、"))")
         }
 
         // 好感度情報
-        let activeLikability = likability.filter { $0.value != 50 }
+        let activeLikability = memoryManager.getAllLikability().filter { $0.value != 50 }
         if !activeLikability.isEmpty {
             let likabilityStr = activeLikability.map { user, score in
                 let level: String
@@ -1418,8 +860,8 @@ class YUiManager {
             parts.append("【YUiの各ユーザーへの好感度(0-100)】\n\(likabilityStr)")
         }
 
-        // ユーザー別記憶（会話に登場する人の記憶を添付）
-        let mentionedUsers = Set((newMessages + conversationMemory.suffix(10).map { $0.text }).compactMap { msg -> String? in
+        // ユーザー別記憶
+        let mentionedUsers = Set((newMessages + memoryManager.conversationMemory.suffix(10).map { $0.text }).compactMap { msg -> String? in
             if let r = msg.range(of: ": ") ?? msg.range(of: "： ") {
                 let u = String(msg[msg.startIndex..<r.lowerBound])
                 return u != "YUi" ? u : nil
@@ -1427,16 +869,16 @@ class YUiManager {
             return nil
         })
         let relevantMemories = mentionedUsers.compactMap { user -> String? in
-            guard let mem = getUserMemory(for: user), !mem.isEmpty else { return nil }
+            guard let mem = memoryManager.getUserMemory(for: user), !mem.isEmpty else { return nil }
             return "・\(user): \(mem)"
         }
         if !relevantMemories.isEmpty {
             parts.append("【ユーザーの記憶（前回までの印象）】\n\(relevantMemories.joined(separator: "\n"))")
         }
 
-        // YUiの経験（擬似体験）を新着メッセージから検索して注入
+        // YUiの経験
         let expQuery = newMessages.joined(separator: " ")
-        let relevantExperiences = findRelevantExperiences(query: expQuery)
+        let relevantExperiences = experienceManager.findRelevantExperiences(query: expQuery)
         if !relevantExperiences.isEmpty {
             let expLines = relevantExperiences.map { exp in
                 "・\(exp.event)（感情: \(exp.emotion)、学び: \(exp.learning)）"
@@ -1444,22 +886,19 @@ class YUiManager {
             parts.append("【YUiの経験（自分自身の過去の体験）】\n\(expLines.joined(separator: "\n"))")
         }
 
-        // 過去の要約がある場合
-        if !memorySummary.isEmpty {
-            parts.append("【これまでの会話の要約】\n\(memorySummary)")
+        if !memoryManager.memorySummary.isEmpty {
+            parts.append("【これまでの会話の要約】\n\(memoryManager.memorySummary)")
         }
 
-        // 直近の会話履歴（新着を除く）
-        let recentMemory = conversationMemory
+        let recentMemory = memoryManager.conversationMemory
             .filter { entry in !newMessages.contains(entry.text) }
-            .suffix(20) // 直近20件
+            .suffix(20)
             .map { $0.text }
         if !recentMemory.isEmpty {
             parts.append("【最近の会話】\n\(recentMemory.joined(separator: "\n"))")
         }
 
-        // 新着メッセージ
-        // テキストコメントと音声を分離して表示
+        // テキストコメントと音声を分離
         let comments = newMessages.filter { $0.contains("[コメント]") }
         let voiceMessages = newMessages.filter { !$0.contains("[コメント]") }
 
@@ -1473,7 +912,7 @@ class YUiManager {
             parts.append("【新着メッセージ】\n\(newMessages.joined(separator: "\n"))")
         }
 
-        // 復活の喜び（すねてたのに誰かが来てくれた）
+        // 復活の喜び
         if recoveryJoy >= 3 {
             parts.append("【YUiの今の気持ち（これを最優先で反映して）】\nずっとすねてたのに、やっと誰かが来てくれた！めちゃくちゃ嬉しい！「やった！」「待ってたー！」テンション爆上がり。すねてたことなんか忘れたみたいな切り替えの早さ。")
             recoveryJoy = 0
@@ -1482,7 +921,6 @@ class YUiManager {
             recoveryJoy = 0
         }
 
-        // すねレベル（構ってもらえてない）
         if lonelinessLevel >= 1 {
             let desc: String
             switch lonelinessLevel {
@@ -1494,7 +932,6 @@ class YUiManager {
             parts.append("【YUiの今の気持ち（これを最優先で反映して）】\n\(desc)")
         }
 
-        // 会話テンポ
         let tempo = conversationTempo()
         switch tempo {
         case .lively:
@@ -1504,29 +941,26 @@ class YUiManager {
         case .slow:
             parts.append("【会話テンポ】ゆっくり。共感や深掘りで会話を繋いで。")
         case .silent:
-            break  // idle handlerで処理
+            break
         }
 
-        // 話題の種類を推定
-        let topicType = detectTopicType(from: conversationMemory.suffix(10).map { $0.text })
+        let topicType = YUiSpamFilter.detectTopicType(from: memoryManager.conversationMemory.suffix(10).map { $0.text })
         if let topicType = topicType {
             parts.append("【話題の種類】\(topicType)")
         }
 
-        // パーソナリティスライダー（自動モード時は状況で上書き）
         let effectivePersonality = autoAdjustedPersonality(tempo: tempo, topicType: topicType)
         parts.append(effectivePersonality.promptModifier)
 
         return parts.joined(separator: "\n\n")
     }
 
-    /// ストリーミング用メッセージ配列を構築
     private func buildStreamingMessages(context: String) -> [[String: String]] {
         var messages: [[String: String]] = [
             ["role": "system", "content": systemPrompt]
         ]
 
-        let recentEntries = conversationMemory.suffix(30)
+        let recentEntries = memoryManager.conversationMemory.suffix(30)
         var currentUserBatch: [String] = []
 
         for entry in recentEntries {
@@ -1555,73 +989,11 @@ class YUiManager {
         return messages
     }
 
-    // MARK: - 繰り返し検出
-
-    /// 過去の発言と似すぎていないかチェック
-    private func isTooSimilarToPast(_ response: String) -> Bool {
-        let newWords = extractKeywords(response)
-        for past in myResponseHistory.suffix(10) {
-            let pastWords = extractKeywords(past)
-            // キーワードの重複率を計算
-            let common = newWords.intersection(pastWords)
-            let total = min(newWords.count, pastWords.count)
-            guard total > 0 else { continue }
-            let overlap = Double(common.count) / Double(total)
-            if overlap > 0.6 { return true }  // 60%以上のキーワードが同じなら類似とみなす
-        }
-        return false
-    }
-
-    /// テキストからキーワード（助詞等を除く意味のある語）を抽出
-    private func extractKeywords(_ text: String) -> Set<String> {
-        // 簡易的に2文字以上のひらがな/カタカナ/漢字のかたまりを抽出
-        let pattern = #"[\p{Han}\p{Katakana}ー]{2,}|[ぁ-ん]{3,}"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let range = NSRange(text.startIndex..., in: text)
-        let matches = regex.matches(in: text, range: range)
-        var words = Set<String>()
-        for match in matches {
-            if let r = Range(match.range, in: text) {
-                words.insert(String(text[r]))
-            }
-        }
-        return words
-    }
-
-    // MARK: - 話題種類の推定
-
-    private func detectTopicType(from messages: [String]) -> String? {
-        let text = messages.joined(separator: " ").lowercased()
-
-        let techKeywords = ["コード", "api", "バグ", "デプロイ", "サーバー", "python", "swift", "react", "ai", "機械学習", "データ", "プログラム", "開発", "実装", "エラー"]
-        let gameKeywords = ["ゲーム", "プレイ", "攻略", "ガチャ", "レベル", "ボス", "スイッチ", "ps5", "steam", "apexなど"]
-        let foodKeywords = ["食べ", "ご飯", "ラーメン", "カレー", "美味し", "うまい", "飲み", "ビール", "酒"]
-        let negativeKeywords = ["疲れ", "しんどい", "つらい", "辛い", "嫌だ", "最悪", "むかつく", "泣き", "死に"]
-
-        let techScore = techKeywords.filter { text.contains($0) }.count
-        let gameScore = gameKeywords.filter { text.contains($0) }.count
-        let foodScore = foodKeywords.filter { text.contains($0) }.count
-        let negScore = negativeKeywords.filter { text.contains($0) }.count
-
-        let maxScore = max(techScore, gameScore, foodScore, negScore)
-        guard maxScore >= 2 else { return nil }
-
-        if negScore == maxScore { return "ネガティブ・愚痴（トーン下げて、静かに寄り添って）" }
-        if techScore == maxScore { return "技術・仕事（知的好奇心モード。質問や深掘りOK）" }
-        if gameScore == maxScore { return "ゲーム・エンタメ（テンション高め！ノリよく！）" }
-        if foodScore == maxScore { return "食べ物・グルメ（リラックスモード。好みを語ってOK）" }
-        return nil
-    }
-
     // MARK: - 要約機能（キャッチアップ）
 
-    /// 直近の会話を要約してキャッチアップ（メニューから呼ばれる）
-    func generateCatchUp(completion: @escaping (String?) -> Void) {
-        let recent = conversationMemory.suffix(30).map { $0.text }
-        guard !recent.isEmpty, hasAPIKey else {
-            completion(nil)
-            return
-        }
+    func generateCatchUp() async -> String? {
+        let recent = memoryManager.conversationMemory.suffix(30).map { $0.text }
+        guard !recent.isEmpty, hasAPIKey else { return nil }
 
         let prompt = """
             以下は音声ルームの直近の会話です。
@@ -1632,16 +1004,21 @@ class YUiManager {
             \(recent.joined(separator: "\n"))
             """
 
-        callOpenAIRaw(systemPrompt: "あなたはYUi（ゆい）。タメ口で話す会話要約アシスタント。", userMessage: prompt, completion: completion)
+        return await apiClient.callRaw(systemPrompt: "あなたはYUi（ゆい）。タメ口で話す会話要約アシスタント。", userMessage: prompt)
+    }
+
+    /// callback版（既存呼び出し元との互換用）
+    func generateCatchUp(completion: @escaping (String?) -> Void) {
+        Task {
+            let result = await generateCatchUp()
+            await MainActor.run { completion(result) }
+        }
     }
 
     // MARK: - 翻訳検出
 
-    /// テキストが日本語以外を含むか判定し、翻訳が必要なら翻訳する
-    func translateIfNeeded(_ text: String, completion: @escaping (String?) -> Void) {
-        // 日本語・ASCII以外の文字が多い場合に翻訳
+    func translateIfNeeded(_ text: String) async -> String? {
         let nonJapaneseCount = text.unicodeScalars.filter { scalar in
-            // 日本語（ひらがな・カタカナ・漢字）、ASCII、句読点以外
             let v = scalar.value
             let isJapanese = (0x3040...0x309F).contains(v) || (0x30A0...0x30FF).contains(v) ||
                              (0x4E00...0x9FFF).contains(v) || (0xFF00...0xFFEF).contains(v)
@@ -1651,347 +1028,23 @@ class YUiManager {
         }.count
 
         let ratio = text.isEmpty ? 0 : Float(nonJapaneseCount) / Float(text.count)
-        guard ratio > 0.3, hasAPIKey else {
-            completion(nil)
-            return
-        }
+        guard ratio > 0.3, hasAPIKey else { return nil }
 
         let prompt = "以下のテキストを日本語に翻訳してください。翻訳だけを返してください。\n\n\(text)"
-        callOpenAIRaw(systemPrompt: "翻訳者。自然な日本語に翻訳する。余計な説明は不要。", userMessage: prompt, completion: completion)
+        return await apiClient.callRaw(systemPrompt: "翻訳者。自然な日本語に翻訳する。余計な説明は不要。", userMessage: prompt)
     }
 
-    // MARK: - メモリ管理
-
-    private func pruneMemory() {
-        let cutoff = Date().addingTimeInterval(-memoryDuration)
-        conversationMemory.removeAll { $0.timestamp < cutoff }
-    }
-
-    private func startCompressionTimer() {
-        compressionTimer = Timer.scheduledTimer(withTimeInterval: memoryDuration, repeats: true) { [weak self] _ in
-            self?.compressMemory()
-        }
-    }
-
-    /// 30分以上前の会話を要約に圧縮 + ユーザー別記憶を更新
-    private func compressMemory() {
-        let cutoff = Date().addingTimeInterval(-memoryDuration)
-        let oldMessages = conversationMemory.filter { $0.timestamp < cutoff }
-
-        guard !oldMessages.isEmpty, hasAPIKey else { return }
-
-        // ユーザー別に会話を振り分けて記憶を更新
-        var userMessages: [String: [String]] = [:]
-        for entry in oldMessages {
-            if let colonRange = entry.text.range(of: ": ") ?? entry.text.range(of: "： ") {
-                let user = String(entry.text[entry.text.startIndex..<colonRange.lowerBound])
-                if user != "YUi" && !user.isEmpty {
-                    userMessages[user, default: []].append(entry.text)
-                }
-            }
-        }
-        for (user, msgs) in userMessages where msgs.count >= 2 {
-            updateUserMemory(user: user, recentMessages: msgs)
-        }
-
-        let texts = oldMessages.map { $0.text }.joined(separator: "\n")
-
-        // 古いメッセージを削除
-        conversationMemory.removeAll { $0.timestamp < cutoff }
-
-        onLog?("🧠 メモリ圧縮中...")
-
-        // OpenAIで要約生成
-        let summaryPrompt = "以下の会話を3行以内で簡潔に要約してください。重要な話題、人名、結論を残してください。\n\n\(texts)"
-
-        callOpenAIRaw(systemPrompt: "あなたは会話の要約をするアシスタントです。", userMessage: summaryPrompt) { [weak self] summary in
-            DispatchQueue.main.async {
-                if let summary = summary {
-                    if let existing = self?.memorySummary, !existing.isEmpty {
-                        self?.memorySummary = "\(existing)\n\(summary)"
-                    } else {
-                        self?.memorySummary = summary
-                    }
-                    self?.onLog?("🧠 メモリ圧縮完了")
-                    self?.saveMemory()
-                }
-            }
+    /// callback版（既存呼び出し元との互換用）
+    func translateIfNeeded(_ text: String, completion: @escaping (String?) -> Void) {
+        Task {
+            let result = await translateIfNeeded(text)
+            await MainActor.run { completion(result) }
         }
     }
 
     // MARK: - メモリ永続化
 
-    /// 未保存のユーザー記憶をすべてフラッシュ（アプリ終了時用）
     func flushAllMemory() {
-        // 未保存のユーザー別メッセージを記憶に反映
-        for (user, msgs) in pendingUserMessages where msgs.count >= 2 {
-            updateUserMemory(user: user, recentMessages: msgs)
-        }
-        pendingUserMessages.removeAll()
-        saveMemory()
-        saveUserMemory()
-        saveLikability()
-    }
-
-    /// メモリをJSONファイルに保存
-    private func saveMemory() {
-        let entries = conversationMemory.map { entry -> [String: Any] in
-            ["timestamp": entry.timestamp.timeIntervalSince1970, "text": entry.text]
-        }
-        let data: [String: Any] = [
-            "conversationMemory": entries,
-            "memorySummary": memorySummary,
-            "myResponseHistory": myResponseHistory,
-            "savedAt": Date().timeIntervalSince1970
-        ]
-        if let json = try? JSONSerialization.data(withJSONObject: data, options: .prettyPrinted) {
-            try? json.write(to: Self.memoryFileURL)
-        }
-    }
-
-    /// メモリをJSONファイルから読み込み
-    private func loadMemory() {
-        guard let data = try? Data(contentsOf: Self.memoryFileURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-
-        // 保存時刻チェック（24時間以上前なら要約だけ復元）
-        let savedAt = json["savedAt"] as? TimeInterval ?? 0
-        let age = Date().timeIntervalSince1970 - savedAt
-        let isOld = age > 86400  // 24時間
-
-        // 要約は常に復元
-        if let summary = json["memorySummary"] as? String, !summary.isEmpty {
-            memorySummary = summary
-        }
-
-        // レスポンス履歴は常に復元
-        if let history = json["myResponseHistory"] as? [String] {
-            myResponseHistory = history
-        }
-
-        // 会話メモリは24時間以内なら復元
-        if !isOld, let entries = json["conversationMemory"] as? [[String: Any]] {
-            conversationMemory = entries.compactMap { entry in
-                guard let ts = entry["timestamp"] as? TimeInterval,
-                      let text = entry["text"] as? String else { return nil }
-                return (timestamp: Date(timeIntervalSince1970: ts), text: text)
-            }
-            // 30分以上古いものは除外
-            pruneMemory()
-        }
-
-        if !conversationMemory.isEmpty || !memorySummary.isEmpty {
-            NSLog("[YUi] メモリ復元: 会話\(conversationMemory.count)件, 要約\(memorySummary.count)文字")
-        }
-    }
-
-    // MARK: - OpenAI API
-
-    private func callOpenAI(context: String, completion: @escaping (String?) -> Void) {
-        // マルチターン: system → 会話履歴(user/assistant交互) → 今回のuser
-        var messages: [[String: String]] = [
-            ["role": "system", "content": systemPrompt]
-        ]
-
-        // 会話履歴をuser/assistantペアとして構築
-        // conversationMemoryの中からYUiの発言とユーザーの発言を交互に配置
-        let recentEntries = conversationMemory.suffix(30)
-        var currentUserBatch: [String] = []
-
-        for entry in recentEntries {
-            if entry.text.hasPrefix("YUi: ") || entry.text.hasPrefix("🤖") {
-                // YUiの発言の前にユーザーの会話をまとめて挿入
-                if !currentUserBatch.isEmpty {
-                    messages.append(["role": "user", "content": currentUserBatch.joined(separator: "\n")])
-                    currentUserBatch = []
-                }
-                let yText = entry.text
-                    .replacingOccurrences(of: "YUi: ", with: "")
-                    .replacingOccurrences(of: "🤖 ", with: "")
-                messages.append(["role": "assistant", "content": yText])
-            } else {
-                currentUserBatch.append(entry.text)
-            }
-        }
-
-        // 今回のコンテキスト（新着メッセージ含む）
-        let userMsg = """
-            以下は音声ルームのみんなの会話です。
-            場の空気を読んで、一番自然な雑談の返しをしてください。
-            傾聴・ツッコミ・深掘り・話題提供の中から、今の流れに合うものを選んで。
-
-            \(context)
-            """
-        messages.append(["role": "user", "content": userMsg])
-
-        callOpenAIRaw(messages: messages, completion: completion)
-    }
-
-    private func callOpenAIRaw(systemPrompt: String, userMessage: String, completion: @escaping (String?) -> Void) {
-        let messages: [[String: String]] = [
-            ["role": "system", "content": systemPrompt],
-            ["role": "user", "content": userMessage]
-        ]
-        callOpenAIRaw(messages: messages, completion: completion)
-    }
-
-    private func callOpenAIRaw(messages: [[String: String]], completion: @escaping (String?) -> Void) {
-        let url = URL(string: "https://api.openai.com/v1/chat/completions")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let modelName = useMinModel ? "gpt-4o-mini" : "gpt-4o"
-        let body: [String: Any] = [
-            "model": modelName,
-            "messages": messages,
-            "temperature": 0.8
-        ]
-
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            if let error = error {
-                let msg = "❌ API通信エラー: \(error.localizedDescription)"
-                NSLog("[YUi] \(msg)")
-                DispatchQueue.main.async { self?.onLog?(msg) }
-                completion(nil)
-                return
-            }
-
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-
-            guard let data = data else {
-                let msg = "❌ APIレスポンスなし (HTTP \(statusCode))"
-                NSLog("[YUi] \(msg)")
-                DispatchQueue.main.async { self?.onLog?(msg) }
-                completion(nil)
-                return
-            }
-
-            // エラーレスポンスのチェック
-            if statusCode != 200 {
-                let raw = String(data: data, encoding: .utf8) ?? "(デコード不可)"
-                let msg: String
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let err = json["error"] as? [String: Any],
-                   let errMsg = err["message"] as? String {
-                    msg = "❌ API エラー (HTTP \(statusCode)): \(errMsg)"
-                } else {
-                    msg = "❌ API エラー (HTTP \(statusCode)): \(raw.prefix(200))"
-                }
-                NSLog("[YUi] \(msg)")
-                DispatchQueue.main.async { self?.onLog?(msg) }
-                completion(nil)
-                return
-            }
-
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
-                  let first = choices.first,
-                  let message = first["message"] as? [String: Any],
-                  let content = message["content"] as? String else {
-                let raw = String(data: data, encoding: .utf8) ?? "(デコード不可)"
-                let msg = "❌ APIレスポンス解析失敗: \(raw.prefix(200))"
-                NSLog("[YUi] \(msg)")
-                DispatchQueue.main.async { self?.onLog?(msg) }
-                completion(nil)
-                return
-            }
-            completion(content.trimmingCharacters(in: .whitespacesAndNewlines))
-        }.resume()
-    }
-
-    // MARK: - ストリーミング応答
-
-    /// ストリーミングでOpenAI APIを呼び出し、文単位でコールバック
-    /// onSentence: 文が完成するたびに呼ばれる（即座に読み上げ開始できる）
-    /// onComplete: 全文完了時に呼ばれる
-    func callOpenAIStreaming(messages: [[String: String]], onSentence: @escaping (String) -> Void, onComplete: @escaping (String?) -> Void) {
-        let url = URL(string: "https://api.openai.com/v1/chat/completions")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let modelName = useMinModel ? "gpt-4o-mini" : "gpt-4o"
-        let body: [String: Any] = [
-            "model": modelName,
-            "messages": messages,
-            "temperature": 0.8,
-            "stream": true
-        ]
-
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        let delegate = StreamingDelegate(onSentence: onSentence, onComplete: onComplete)
-        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
-        session.dataTask(with: request).resume()
-    }
-}
-
-// MARK: - ストリーミングデリゲート
-
-private class StreamingDelegate: NSObject, URLSessionDataDelegate {
-    private let onSentence: (String) -> Void
-    private let onComplete: (String?) -> Void
-    private var buffer = ""
-    private var fullText = ""
-    private var sentenceSeparators: [Character] = ["。", "！", "？", "!", "?", "\n"]
-
-    init(onSentence: @escaping (String) -> Void, onComplete: @escaping (String?) -> Void) {
-        self.onSentence = onSentence
-        self.onComplete = onComplete
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard let text = String(data: data, encoding: .utf8) else { return }
-
-        // SSEフォーマットをパース
-        let lines = text.components(separatedBy: "\n")
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix("data: ") else { continue }
-            let jsonStr = String(trimmed.dropFirst(6))
-
-            if jsonStr == "[DONE]" {
-                // 残りのバッファも送信
-                if !buffer.isEmpty {
-                    let sentence = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !sentence.isEmpty {
-                        DispatchQueue.main.async { self.onSentence(sentence) }
-                    }
-                    buffer = ""
-                }
-                DispatchQueue.main.async { self.onComplete(self.fullText) }
-                return
-            }
-
-            guard let jsonData = jsonStr.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
-                  let delta = choices.first?["delta"] as? [String: Any],
-                  let content = delta["content"] as? String else { continue }
-
-            buffer += content
-            fullText += content
-
-            // 文末を検出して文単位でコールバック
-            while let idx = buffer.firstIndex(where: { sentenceSeparators.contains($0) }) {
-                let sentence = String(buffer[buffer.startIndex...idx]).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !sentence.isEmpty {
-                    DispatchQueue.main.async { self.onSentence(sentence) }
-                }
-                buffer = String(buffer[buffer.index(after: idx)...])
-            }
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error {
-            NSLog("[YUi] Streaming error: \(error.localizedDescription)")
-            DispatchQueue.main.async { self.onComplete(nil) }
-        }
+        memoryManager.flushAllMemory(apiClient: apiClient)
     }
 }

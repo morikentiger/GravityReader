@@ -124,7 +124,7 @@ class StatusBarController {
         menu.addItem(apiKeyItem)
 
         // モデル切替
-        let isMin = UserDefaults.standard.bool(forKey: "YUiUseMinModel")
+        let isMin = AppDefaults.suite.bool(forKey: "YUiUseMinModel")
         let modelItem = NSMenuItem(title: isMin ? "✓ gpt-4o-mini（節約）" : "  gpt-4o-mini（節約）", action: #selector(toggleModel), keyEquivalent: "")
         modelItem.target = self
         modelItem.tag = 999
@@ -132,7 +132,7 @@ class StatusBarController {
 
         // YUi応答頻度サブメニュー
         frequencySubmenu = NSMenu()
-        let currentFreq = YUiFrequency(rawValue: UserDefaults.standard.string(forKey: "YUiFrequency") ?? "") ?? .high
+        let currentFreq = YUiFrequency(rawValue: AppDefaults.suite.string(forKey: "YUiFrequency") ?? "") ?? .high
         for freq in YUiFrequency.allCases {
             let prefix = freq == currentFreq ? "✓ " : "  "
             let item = NSMenuItem(title: "\(prefix)\(freq.rawValue)", action: #selector(selectFrequency(_:)), keyEquivalent: "")
@@ -274,7 +274,7 @@ class StatusBarController {
         let input = NSTextField(frame: NSRect(x: 20, y: 70, width: 380, height: 28))
         input.placeholderString = "sk-..."
         input.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        let current = UserDefaults.standard.string(forKey: "YUiOpenAIAPIKey") ?? ""
+        let current = KeychainHelper.load(key: "YUiOpenAIAPIKey") ?? ""
         if !current.isEmpty {
             input.stringValue = current
         }

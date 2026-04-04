@@ -8,7 +8,7 @@ class GravityCaptureManager {
     var yuiManager: YUiManager?
     var roomTranscription: RoomTranscriptionManager?
     private let gravityBundleID = "com.hiclub.gravity"
-    private let pollInterval: TimeInterval = 2.0
+    private let pollInterval: TimeInterval = 1.0
 
     /// 一度読み上げたテキストはセッション中ずっと記憶（再読み上げしない）
     private var spokenHistory: Set<String> = []
@@ -41,13 +41,13 @@ class GravityCaptureManager {
 
 
     /// 参加/退出の正規表現
-    private let joinPattern: NSRegularExpression? = {
+    private let joinPattern: NSRegularExpression = {
         // "ぬぬ が音声ルームに参加しました" or "鼻セレブ (初見)が音声ルームに参加しました"
-        try? NSRegularExpression(pattern: #"^(.+?)(?:\s*\(.+?\))?\s*が音声ルームに参加しました$"#)
+        try! NSRegularExpression(pattern: #"^(.+?)(?:\s*\(.+?\))?\s*が音声ルームに参加しました$"#)
     }()
-    private let leavePattern: NSRegularExpression? = {
+    private let leavePattern: NSRegularExpression = {
         // "XXX が退出しました" or "XXX が音声ルームから退出しました"
-        try? NSRegularExpression(pattern: #"^(.+?)(?:\s*\(.+?\))?\s*が(?:音声ルームから)?退出しました$"#)
+        try! NSRegularExpression(pattern: #"^(.+?)(?:\s*\(.+?\))?\s*が(?:音声ルームから)?退出しました$"#)
     }()
 
     // MARK: - UIノイズフィルタ
@@ -72,13 +72,13 @@ class GravityCaptureManager {
             #"^あと\d+日$"#,             // "あと6日" 等のカウントダウン
             #"^(初級|中級|上級|特級|超級)\d+$"#,  // "初級60000" 等のランク表示
         ]
-        return patterns.compactMap { try? NSRegularExpression(pattern: $0) }
+        return patterns.map { try! NSRegularExpression(pattern: $0) }
     }()
 
     /// ユーザー名っぽいパターン（「名前, タグ」形式）
-    private let userNamePattern: NSRegularExpression? = {
+    private let userNamePattern: NSRegularExpression = {
         // "ぴうセポネ。🐣ྀི" や "まきねこ🐈, XOXO" や "もりけん社長🥕🥩[オーナー]" 等
-        try? NSRegularExpression(pattern: #"^(.+),\s*.+$"#)
+        try! NSRegularExpression(pattern: #"^(.+),\s*.+$"#)
     }()
 
     /// 通知バナーに含まれるキーワード（ユーザー名として誤検出を防止）
@@ -90,23 +90,23 @@ class GravityCaptureManager {
 
     /// ボイスコマンドパターン: "!voice ユーザー名 声の名前" や "！声　ぺんぽん　ずんだもん"
     /// 半角・全角スペース両対応
-    private let voiceCommandPattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: #"^[!！](voice|声)[\s\u{3000}]+(.+?)[\s\u{3000}]+(.+)$"#)
+    private let voiceCommandPattern: NSRegularExpression = {
+        try! NSRegularExpression(pattern: #"^[!！](voice|声)[\s\u{3000}]+(.+?)[\s\u{3000}]+(.+)$"#)
     }()
 
     /// 読み辞書コマンド: "!読み 辛い つらい" or "!yomi C3PO シースリーピーオー"
-    private let readingCommandPattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: #"^[!！](読み|yomi)[\s\u{3000}]+(.+?)[\s\u{3000}]+(.+)$"#)
+    private let readingCommandPattern: NSRegularExpression = {
+        try! NSRegularExpression(pattern: #"^[!！](読み|yomi)[\s\u{3000}]+(.+?)[\s\u{3000}]+(.+)$"#)
     }()
 
     /// 読み辞書削除コマンド: "!読み削除 辛い" or "!yomi-del C3PO"
-    private let readingDeletePattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: #"^[!！](読み削除|yomi-del)[\s\u{3000}]+(.+)$"#)
+    private let readingDeletePattern: NSRegularExpression = {
+        try! NSRegularExpression(pattern: #"^[!！](読み削除|yomi-del)[\s\u{3000}]+(.+)$"#)
     }()
 
     /// 読み辞書一覧: "!読み一覧" or "!yomi-list"
-    private let readingListPattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: #"^[!！](読み一覧|yomi-list)[\s\u{3000}]*$"#)
+    private let readingListPattern: NSRegularExpression = {
+        try! NSRegularExpression(pattern: #"^[!！](読み一覧|yomi-list)[\s\u{3000}]*$"#)
     }()
 
     private func isUINoiseOrSystemMessage(_ text: String) -> Bool {
@@ -134,7 +134,7 @@ class GravityCaptureManager {
     private func extractUserName(_ text: String) -> String? {
         // 通知バナーはユーザー名ではない
         if isNotificationBanner(text) { return nil }
-        guard let regex = userNamePattern else { return nil }
+        let regex = userNamePattern
         let range = NSRange(text.startIndex..., in: text)
         if let match = regex.firstMatch(in: text, range: range),
            let nameRange = Range(match.range(at: 1), in: text) {
@@ -200,7 +200,7 @@ class GravityCaptureManager {
     /// ボイスコマンドを検出して処理。処理した場合trueを返す
     /// 形式: "!声 ユーザー名 声の名前" (例: "!声 ナポリタン ずんだもん")
     private func handleVoiceCommand(_ text: String) -> Bool {
-        guard let regex = voiceCommandPattern else { return false }
+        let regex = voiceCommandPattern
         let range = NSRange(text.startIndex..., in: text)
         guard let match = regex.firstMatch(in: text, range: range),
               let userRange = Range(match.range(at: 2), in: text),
@@ -239,8 +239,7 @@ class GravityCaptureManager {
         let range = NSRange(trimmed.startIndex..., in: trimmed)
 
         // 一覧: !読み一覧（先にチェック — 登録パターンより前に）
-        if let regex = readingListPattern,
-           regex.firstMatch(in: trimmed, range: range) != nil {
+        if readingListPattern.firstMatch(in: trimmed, range: range) != nil {
             let entries = speechManager.readingDictionaryEntries()
             if entries.isEmpty {
                 logWindow?.addEntry("📖 読み辞書は空です")
@@ -254,8 +253,7 @@ class GravityCaptureManager {
         }
 
         // 削除: !読み削除 辛い
-        if let regex = readingDeletePattern,
-           let match = regex.firstMatch(in: trimmed, range: range),
+        if let match = readingDeletePattern.firstMatch(in: trimmed, range: range),
            let wordRange = Range(match.range(at: 2), in: trimmed) {
             let word = String(trimmed[wordRange]).trimmingCharacters(in: .whitespaces)
             speechManager.removeReading(word: word)
@@ -264,8 +262,7 @@ class GravityCaptureManager {
         }
 
         // 登録: !読み 辛い つらい
-        if let regex = readingCommandPattern,
-           let match = regex.firstMatch(in: trimmed, range: range),
+        if let match = readingCommandPattern.firstMatch(in: trimmed, range: range),
            let wordRange = Range(match.range(at: 2), in: trimmed),
            let readingRange = Range(match.range(at: 3), in: trimmed) {
             let word = String(trimmed[wordRange]).trimmingCharacters(in: .whitespaces)
@@ -373,9 +370,9 @@ class GravityCaptureManager {
     /// 入退室メッセージかどうかチェック。処理した場合trueを返す
     private func handleJoinLeaveMessage(_ text: String) -> Bool {
         // 参加
-        if let regex = joinPattern {
+        do {
             let range = NSRange(text.startIndex..., in: text)
-            if let match = regex.firstMatch(in: text, range: range),
+            if let match = joinPattern.firstMatch(in: text, range: range),
                let nameRange = Range(match.range(at: 1), in: text) {
                 let name = String(text[nameRange]).trimmingCharacters(in: .whitespaces)
                 registerUser(name)
@@ -388,9 +385,9 @@ class GravityCaptureManager {
             }
         }
         // 退出（退出メッセージだけが参加者を減らす唯一の手段）
-        if let regex = leavePattern {
+        do {
             let range = NSRange(text.startIndex..., in: text)
-            if let match = regex.firstMatch(in: text, range: range),
+            if let match = leavePattern.firstMatch(in: text, range: range),
                let nameRange = Range(match.range(at: 1), in: text) {
                 let name = String(text[nameRange]).trimmingCharacters(in: .whitespaces)
                 currentParticipants.removeAll { $0.contains(name) || name.contains($0) }

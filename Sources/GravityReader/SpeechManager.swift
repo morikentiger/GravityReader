@@ -29,7 +29,7 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     /// デフォルト音声（メニューで選択されたもの）
     var voiceMode: VoiceMode = .system {
-        didSet { UserDefaults.standard.set(voiceModeToString(voiceMode), forKey: "GR_VoiceMode") }
+        didSet { AppDefaults.suite.set(voiceModeToString(voiceMode), forKey: "GR_VoiceMode") }
     }
 
     /// ユーザー別ボイス割り当て（ユーザー名 → VoiceMode）
@@ -52,17 +52,17 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         super.init()
         synthesizer.delegate = self
         // 保存済み設定を復元
-        if let saved = UserDefaults.standard.string(forKey: "GR_VoiceMode") {
+        if let saved = AppDefaults.suite.string(forKey: "GR_VoiceMode") {
             voiceMode = stringToVoiceMode(saved)
         }
         // ユーザー別ボイス設定を復元
-        if let savedMap = UserDefaults.standard.dictionary(forKey: "GR_UserVoiceMap") as? [String: String] {
+        if let savedMap = AppDefaults.suite.dictionary(forKey: "GR_UserVoiceMap") as? [String: String] {
             for (user, modeStr) in savedMap {
                 userVoiceMap[user] = stringToVoiceMode(modeStr)
             }
         }
         // 読み辞書を復元
-        if let savedDict = UserDefaults.standard.dictionary(forKey: readingDictKey) as? [String: String] {
+        if let savedDict = AppDefaults.suite.dictionary(forKey: readingDictKey) as? [String: String] {
             readingDictionary = savedDict
         }
         // デフォルト辞書（未登録のエントリのみ自動追加）
@@ -218,7 +218,7 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         for (user, mode) in userVoiceMap {
             dict[user] = voiceModeToString(mode)
         }
-        UserDefaults.standard.set(dict, forKey: "GR_UserVoiceMap")
+        AppDefaults.suite.set(dict, forKey: "GR_UserVoiceMap")
     }
 
     // MARK: - 読み辞書
@@ -257,23 +257,17 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     private func saveReadingDictionary() {
-        UserDefaults.standard.set(readingDictionary, forKey: readingDictKey)
+        AppDefaults.suite.set(readingDictionary, forKey: readingDictKey)
     }
 
     // MARK: - VOICEVOX スピーカー取得
 
     /// VOICEVOXエンジンから利用可能なスピーカー一覧を取得
-    func fetchVoicevoxSpeakers(completion: @escaping ([VoicevoxSpeaker]) -> Void) {
-        guard let url = URL(string: "\(voicevoxBaseURL)/speakers") else {
-            completion([])
-            return
-        }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                completion([])
-                return
-            }
+    func fetchVoicevoxSpeakers() async -> [VoicevoxSpeaker] {
+        guard let url = URL(string: "\(voicevoxBaseURL)/speakers") else { return [] }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
             var speakers: [VoicevoxSpeaker] = []
             for speaker in json {
                 guard let name = speaker["name"] as? String,
@@ -284,11 +278,19 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
                     speakers.append(VoicevoxSpeaker(id: id, name: name, style: styleName))
                 }
             }
-            DispatchQueue.main.async {
-                self?.cachedSpeakers = speakers
-                completion(speakers)
-            }
-        }.resume()
+            self.cachedSpeakers = speakers
+            return speakers
+        } catch {
+            return []
+        }
+    }
+
+    /// callback版（既存呼び出し元との互換用）
+    func fetchVoicevoxSpeakers(completion: @escaping ([VoicevoxSpeaker]) -> Void) {
+        Task {
+            let speakers = await fetchVoicevoxSpeakers()
+            await MainActor.run { completion(speakers) }
+        }
     }
 
     // MARK: - Private

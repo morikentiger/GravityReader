@@ -453,13 +453,13 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
     // MARK: - Bookmark Persistence
 
     private func loadBookmarks() {
-        if let saved = UserDefaults.standard.array(forKey: bookmarksDefaultsKey) as? [String] {
+        if let saved = AppDefaults.suite.array(forKey: bookmarksDefaultsKey) as? [String] {
             bookmarkedIDs = Set(saved)
         }
     }
 
     private func saveBookmarks() {
-        UserDefaults.standard.set(Array(bookmarkedIDs), forKey: bookmarksDefaultsKey)
+        AppDefaults.suite.set(Array(bookmarkedIDs), forKey: bookmarksDefaultsKey)
     }
 
     // MARK: - Add / Update Entries

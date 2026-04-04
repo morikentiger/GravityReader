@@ -123,7 +123,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         apiKeyField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         apiKeyField.target = self
         apiKeyField.action = #selector(apiKeyChanged(_:))
-        let currentKey = UserDefaults.standard.string(forKey: PrefKey.openAIAPIKey) ?? ""
+        let currentKey = KeychainHelper.load(key: PrefKey.openAIAPIKey) ?? ""
         if !currentKey.isEmpty { apiKeyField.stringValue = currentKey }
         view.addSubview(apiKeyField)
 
@@ -141,7 +141,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         let modelLabel = makeLabel("モデル選択:", frame: NSRect(x: 20, y: 170, width: 200, height: 20))
         view.addSubview(modelLabel)
 
-        let isMin = UserDefaults.standard.bool(forKey: PrefKey.useMinModel)
+        let isMin = AppDefaults.suite.bool(forKey: PrefKey.useMinModel)
 
         modelGPT4oButton = NSButton(radioButtonWithTitle: "gpt-4o（高品質）", target: self, action: #selector(modelSelected(_:)))
         modelGPT4oButton.frame = NSRect(x: 30, y: 142, width: 200, height: 20)
@@ -171,7 +171,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
 
         frequencySegmented = NSSegmentedControl(labels: ["高（20秒）", "中（1分）", "低（3分）"], trackingMode: .selectOne, target: self, action: #selector(frequencyChanged(_:)))
         frequencySegmented.frame = NSRect(x: 130, y: 278, width: 320, height: 24)
-        let savedFreq = YUiFrequency(rawValue: UserDefaults.standard.string(forKey: PrefKey.frequency) ?? "") ?? .high
+        let savedFreq = YUiFrequency(rawValue: AppDefaults.suite.string(forKey: PrefKey.frequency) ?? "") ?? .high
         switch savedFreq {
         case .high:   frequencySegmented.selectedSegment = 0
         case .medium: frequencySegmented.selectedSegment = 1
@@ -184,7 +184,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         view.addSubview(loneLabel)
 
         lonelinessToggle = NSSwitch(frame: NSRect(x: 160, y: 228, width: 40, height: 24))
-        let loneEnabled = UserDefaults.standard.object(forKey: PrefKey.lonelinessEnabled) as? Bool ?? true
+        let loneEnabled = AppDefaults.suite.object(forKey: PrefKey.lonelinessEnabled) as? Bool ?? true
         lonelinessToggle.state = loneEnabled ? .on : .off
         lonelinessToggle.target = self
         lonelinessToggle.action = #selector(lonelinessToggled(_:))
@@ -200,7 +200,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         view.addSubview(aizuchiLabel)
 
         aizuchiToggle = NSSwitch(frame: NSRect(x: 160, y: 183, width: 40, height: 24))
-        let aizuchiEnabled = UserDefaults.standard.object(forKey: PrefKey.aizuchiEnabled) as? Bool ?? true
+        let aizuchiEnabled = AppDefaults.suite.object(forKey: PrefKey.aizuchiEnabled) as? Bool ?? true
         aizuchiToggle.state = aizuchiEnabled ? .on : .off
         aizuchiToggle.target = self
         aizuchiToggle.action = #selector(aizuchiToggled(_:))
@@ -217,7 +217,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
 
         memoryPopup = NSPopUpButton(frame: NSRect(x: 160, y: 137, width: 160, height: 26), pullsDown: false)
         memoryPopup.addItems(withTitles: ["30分", "1時間", "2時間"])
-        let savedMem = UserDefaults.standard.integer(forKey: PrefKey.memoryDuration)
+        let savedMem = AppDefaults.suite.integer(forKey: PrefKey.memoryDuration)
         switch savedMem {
         case 3600:  memoryPopup.selectItem(at: 1)
         case 7200:  memoryPopup.selectItem(at: 2)
@@ -248,7 +248,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         view.addSubview(urlLabel)
 
         voicevoxURLField = NSTextField(frame: NSRect(x: 160, y: 238, width: 280, height: 24))
-        let savedURL = UserDefaults.standard.string(forKey: PrefKey.voicevoxURL) ?? "http://127.0.0.1:50021"
+        let savedURL = AppDefaults.suite.string(forKey: PrefKey.voicevoxURL) ?? "http://127.0.0.1:50021"
         voicevoxURLField.stringValue = savedURL
         voicevoxURLField.placeholderString = "http://127.0.0.1:50021"
         voicevoxURLField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -260,7 +260,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         let rateLabel = makeLabel("読み上げ速度:", frame: NSRect(x: 20, y: 190, width: 130, height: 20))
         view.addSubview(rateLabel)
 
-        let savedRate = UserDefaults.standard.float(forKey: PrefKey.speechRate)
+        let savedRate = AppDefaults.suite.float(forKey: PrefKey.speechRate)
         let rate: Float = savedRate > 0 ? savedRate : 0.52  // default = 0.52
 
         speechRateSlider = NSSlider(value: Double(rate), minValue: 0.3, maxValue: 0.7, target: self, action: #selector(speechRateChanged(_:)))
@@ -409,7 +409,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
     }
 
     private func updateAPIKeyStatus() {
-        let key = UserDefaults.standard.string(forKey: PrefKey.openAIAPIKey) ?? ""
+        let key = KeychainHelper.load(key: PrefKey.openAIAPIKey) ?? ""
         if key.isEmpty {
             apiKeyStatusLabel.stringValue = "状態: 未設定"
             apiKeyStatusLabel.textColor = NSColor.systemOrange
@@ -430,7 +430,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
     @objc private func saveAPIKey(_ sender: Any) {
         let key = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
-        UserDefaults.standard.set(key, forKey: PrefKey.openAIAPIKey)
+        _ = KeychainHelper.save(key: PrefKey.openAIAPIKey, value: key)
         updateAPIKeyStatus()
         onAPIKeyChanged?(key)
     }
@@ -440,7 +440,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         // Keep radio buttons in sync
         modelGPT4oButton.state = useMini ? .off : .on
         modelMiniButton.state = useMini ? .on : .off
-        UserDefaults.standard.set(useMini, forKey: PrefKey.useMinModel)
+        AppDefaults.suite.set(useMini, forKey: PrefKey.useMinModel)
         onModelChanged?(useMini)
     }
 
@@ -454,18 +454,18 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         case 2: freq = .low
         default: return
         }
-        UserDefaults.standard.set(freq.rawValue, forKey: PrefKey.frequency)
+        AppDefaults.suite.set(freq.rawValue, forKey: PrefKey.frequency)
         onFrequencyChanged?(freq)
     }
 
     @objc private func lonelinessToggled(_ sender: NSSwitch) {
         let enabled = sender.state == .on
-        UserDefaults.standard.set(enabled, forKey: PrefKey.lonelinessEnabled)
+        AppDefaults.suite.set(enabled, forKey: PrefKey.lonelinessEnabled)
     }
 
     @objc private func aizuchiToggled(_ sender: NSSwitch) {
         let enabled = sender.state == .on
-        UserDefaults.standard.set(enabled, forKey: PrefKey.aizuchiEnabled)
+        AppDefaults.suite.set(enabled, forKey: PrefKey.aizuchiEnabled)
     }
 
     @objc private func memoryDurationChanged(_ sender: NSPopUpButton) {
@@ -475,21 +475,21 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         case 2: seconds = 7200
         default: seconds = 1800
         }
-        UserDefaults.standard.set(seconds, forKey: PrefKey.memoryDuration)
+        AppDefaults.suite.set(seconds, forKey: PrefKey.memoryDuration)
     }
 
     // MARK: - Actions: Voice Tab
 
     @objc private func voicevoxURLChanged(_ sender: NSTextField) {
         let url = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        UserDefaults.standard.set(url, forKey: PrefKey.voicevoxURL)
+        AppDefaults.suite.set(url, forKey: PrefKey.voicevoxURL)
         onVoicevoxURLChanged?(url)
     }
 
     @objc private func speechRateChanged(_ sender: NSSlider) {
         let rate = Float(sender.doubleValue)
         speechRateLabel.stringValue = String(format: "%.2f", rate)
-        UserDefaults.standard.set(rate, forKey: PrefKey.speechRate)
+        AppDefaults.suite.set(rate, forKey: PrefKey.speechRate)
         onSpeechRateChanged?(rate)
     }
 
@@ -542,7 +542,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
     // MARK: - Notification Rule Persistence
 
     private func loadNotificationRules() {
-        guard let data = UserDefaults.standard.data(forKey: PrefKey.notificationRules) else { return }
+        guard let data = AppDefaults.suite.data(forKey: PrefKey.notificationRules) else { return }
         if let decoded = try? JSONDecoder().decode([NotificationRule].self, from: data) {
             notificationRules = decoded
         }
@@ -550,7 +550,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
 
     private func saveNotificationRules() {
         if let data = try? JSONEncoder().encode(notificationRules) {
-            UserDefaults.standard.set(data, forKey: PrefKey.notificationRules)
+            AppDefaults.suite.set(data, forKey: PrefKey.notificationRules)
         }
     }
 
@@ -603,7 +603,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
     // MARK: - Dictionary Persistence
 
     private func loadDictEntries() {
-        guard let dict = UserDefaults.standard.dictionary(forKey: dictDefaultsKey) as? [String: String] else { return }
+        guard let dict = AppDefaults.suite.dictionary(forKey: dictDefaultsKey) as? [String: String] else { return }
         dictEntries = dict.map { (word: $0.key, reading: $0.value) }.sorted { $0.word < $1.word }
     }
 
@@ -612,7 +612,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         for entry in dictEntries {
             dict[entry.word] = entry.reading
         }
-        UserDefaults.standard.set(dict, forKey: dictDefaultsKey)
+        AppDefaults.suite.set(dict, forKey: dictDefaultsKey)
         onReadingDictChanged?(dict)
     }
 

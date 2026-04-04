@@ -9,36 +9,15 @@ class VoiceDiarizer {
     // MARK: - 型定義
 
     enum Mode {
-        /// ECAPA-TDNN ニューラル埋め込み（192次元、コサイン類似度）
         case neural
-        /// MFCC + ピッチ（39次元、ユークリッド距離）— フォールバック
         case mfcc
     }
 
-    /// 話者ごとの声紋プロファイル
-    struct VoiceProfile {
-        let name: String
-        /// 特徴ベクトル
-        var features: [Float]
-        /// 蓄積したサンプル数（加重平均用）
-        var sampleCount: Int
-        /// プロファイルのモード（neural or mfcc）
-        var mode: Mode
-        /// ピッチ統計（複合判定用）: 平均F0(Hz)
-        var pitchMean: Float?
-        /// ピッチ統計: F0標準偏差(Hz)
-        var pitchStd: Float?
-    }
-
-    /// 識別の確信度レベル
     enum IdentifyConfidence {
-        /// 厳格マージンを満たした確定判定（適応学習OK）
         case strict
-        /// 多数決やソフトマージンによる推定判定（適応学習NG）
         case estimated
     }
 
-    /// unknown 判定の理由（P2-1）
     enum UnknownReason: String, Codable {
         case insufficientQuality = "insufficient_quality"
         case belowMinSimilarity = "below_min_similarity"
@@ -49,16 +28,15 @@ class VoiceDiarizer {
         case featureMismatch = "feature_mismatch"
     }
 
-    /// 構造化デバッグイベント（P0-1）
     struct IdentificationDebugEvent: Codable {
         let timestamp: Date
-        let mode: String               // "neural" or "mfcc"
+        let mode: String
         let topSpeaker: String?
         let topSimilarity: Float?
         let secondSpeaker: String?
         let secondSimilarity: Float?
         let margin: Float?
-        let decisionType: String       // "strict", "soft", "unknown", "voted"
+        let decisionType: String
         let recentVotes: [String]
         let finalDecision: String
         let unknownReason: String?
@@ -73,76 +51,53 @@ class VoiceDiarizer {
         }
     }
 
+    // MARK: - サブコンポーネント
+
+    let embeddingModel = SpeakerEmbeddingModel()
+    let profileStore = VoiceProfileStore()
+    let voting = VoiceTemporalVoting()
+    let mfccExtractor = MFCCFeatureExtractor()
+
     // MARK: - プロパティ
 
-    /// 登録済みの声紋プロファイル
-    private var profiles: [String: VoiceProfile] = [:]
-
-    /// 現在の識別モード
     private(set) var mode: Mode = .mfcc
 
-    /// ニューラル埋め込みモデル
-    let embeddingModel = SpeakerEmbeddingModel()
-
-    // --- ニューラルモード用パラメータ ---
+    // ニューラルモード用パラメータ
     var minSimilarity: Float = 0.45
-    var similarityMargin: Float = 0.06   // 厳格マージン
-    var softMargin: Float = 0.01          // ソフトマージン（多数決でカバー）
+    var similarityMargin: Float = 0.06
+    var softMargin: Float = 0.01
 
-    // --- 時間的多数決（temporal voting）---
-    private var recentVotes: [(speaker: String, score: Float)] = []
-    private let votingWindowSize = 5
-    private let votingMinCount = 3
-
-    // --- スコア正規化（Adaptive Score Normalization）---
-    // 各話者の「普段のスコア」を追跡し、相対的な異常値で判定
-    private var scoreHistory: [String: [Float]] = [:]  // 話者名 → 直近スコア履歴
-    private let scoreHistoryMaxSize = 30                // 直近30回分を保持
-
-    // --- MFCCモード用パラメータ ---
+    // MFCCモード用パラメータ
     var maxDistance: Float = 30.0
     var marginRatio: Float = 1.10
 
-    /// ログコールバック
     var onLog: ((String) -> Void)?
 
-    /// 構造化診断ログの有効化フラグ
-    var diagnosticsEnabled = true
-
-    // MARK: - MFCC パラメータ (フォールバック用)
-
-    private let sampleRate: Float = 44100
-    private let fftSize: Int = 2048
-    private let hopSize: Int = 512
-    private let numMelBands: Int = 40
-    private let numMFCCRaw: Int = 13
-    private let mfccStart: Int = 1
-    private var numMFCC: Int { numMFCCRaw - mfccStart }
-
-    private let pitchMinFreq: Float = 85
-    private let pitchMaxFreq: Float = 400
-    private let pitchNormMin: Float = 85
-    private let pitchNormMax: Float = 400
-
-    private let melLowFreq: Float = 80
-    private let melHighFreq: Float = 7600
+    var diagnosticsEnabled: Bool {
+        get { profileStore.diagnosticsEnabled }
+        set { profileStore.diagnosticsEnabled = newValue }
+    }
 
     /// 特徴ベクトルの次元数
     var featureDimension: Int {
         switch mode {
         case .neural: return SpeakerEmbeddingModel.embeddingDim
-        case .mfcc:   return numMFCC * 3 + 3
+        case .mfcc:   return mfccExtractor.featureDimension
         }
     }
 
-    private lazy var melFilterBank: [[Float]] = buildMelFilterBank()
-    private lazy var dctMatrix: [[Float]] = buildDCTMatrix()
-    private lazy var fftSetup: FFTSetup? = {
-        let log2n = vDSP_Length(log2f(Float(fftSize)))
-        return vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
-    }()
+    /// 登録済みの話者名一覧
+    var registeredSpeakers: [String] { profileStore.registeredSpeakers }
 
-    // MARK: - モデル初期化
+    /// 最後の適応学習診断情報
+    private(set) var lastAdaptiveRejectedReason: String?
+
+    /// 直近の識別に使った生音声サンプル（ピッチ複合判定用）
+    private var lastIdentifySamples: [Float]?
+
+    private let maxAdaptiveUpdates = 100
+
+    // MARK: - モデル初��化
 
     func initializeNeuralModel() {
         embeddingModel.onLog = onLog
@@ -163,71 +118,68 @@ class VoiceDiarizer {
     }
 
     private func switchToNeuralMode() {
-        let hadProfiles = !profiles.isEmpty
+        let hadProfiles = !profileStore.profiles.isEmpty
         mode = .neural
         onLog?("🧠 声紋識別: ECAPA-TDNN ニューラルモードに切り替え")
         if hadProfiles {
-            let names = profiles.keys.joined(separator: ", ")
-            profiles.removeAll()
-            saveProfiles()
+            let names = profileStore.profiles.keys.joined(separator: ", ")
+            profileStore.profiles.removeAll()
+            profileStore.saveProfiles()
             onLog?("⚠️ \(names) の声紋はニューラルモード用に再登録が必要です")
         }
     }
 
+    // MARK: - ログ連携
+
+    private func setupSubcomponentLogs() {
+        profileStore.onLog = onLog
+        voting.onLog = onLog
+    }
+
     // MARK: - Public API
 
-    /// 音声バッファから声の特徴量を抽出
     func extractFeatures(from buffer: AVAudioPCMBuffer) -> [Float]? {
         guard let channelData = buffer.floatChannelData?[0] else { return nil }
         let frameCount = Int(buffer.frameLength)
-        guard frameCount >= fftSize else { return nil }
-
+        guard frameCount >= mfccExtractor.fftSize else { return nil }
         let samples = Array(UnsafeBufferPointer(start: channelData, count: frameCount))
         return extractFeatures(from: samples)
     }
 
-    /// 生のFloat配列から特徴量抽出（品質ゲート付き: P0-3）
     func extractFeatures(from samples: [Float]) -> [Float]? {
         switch mode {
         case .neural:
-            guard samples.count >= Int(sampleRate * 0.5) else { return nil }
-
-            // P0-3: 品質ゲート — 音声品質が不十分ならスキップ
-            let quality = AudioQualityEvaluator.evaluate(samples: samples, sampleRate: sampleRate)
+            guard samples.count >= Int(mfccExtractor.sampleRate * 0.5) else { return nil }
+            let quality = AudioQualityEvaluator.evaluate(samples: samples, sampleRate: mfccExtractor.sampleRate)
             if !quality.isSufficientForInference {
                 let reasons = quality.failureReasons.joined(separator: ", ")
                 onLog?("🔇 音声品質不足でスキップ: \(reasons)")
                 return nil
             }
-
-            return embeddingModel.extractEmbedding(from: samples, sampleRate: sampleRate)
+            return embeddingModel.extractEmbedding(from: samples, sampleRate: mfccExtractor.sampleRate)
         case .mfcc:
-            guard samples.count >= fftSize else { return nil }
-            return extractFullFeatures(from: samples)
+            guard samples.count >= mfccExtractor.fftSize else { return nil }
+            return mfccExtractor.extractFullFeatures(from: samples)
         }
     }
 
-    /// 話者プロファイルを登録/更新（品質検査付き: P0-2）
     func enroll(speaker: String, features: [Float]) {
         guard features.count == featureDimension else { return }
 
-        if var existing = profiles[speaker] {
+        if var existing = profileStore.profiles[speaker] {
             let alpha: Float = 2.0 / Float(min(existing.sampleCount + 2, 20))
             var updated = existing.features
             for i in 0..<featureDimension {
                 updated[i] = updated[i] * (1 - alpha) + features[i] * alpha
             }
-
-            if mode == .neural {
-                updated = l2Normalize(updated)
-            }
-
+            if mode == .neural { updated = l2Normalize(updated) }
             existing.features = updated
             existing.sampleCount += 1
-            profiles[speaker] = existing
+            profileStore.profiles[speaker] = existing
             onLog?("🎤 声紋更新: \(speaker)（サンプル\(existing.sampleCount)）")
         } else {
-            profiles[speaker] = VoiceProfile(name: speaker, features: features, sampleCount: 1, mode: mode)
+            profileStore.profiles[speaker] = VoiceProfileStore.VoiceProfile(
+                name: speaker, features: features, sampleCount: 1, mode: mode)
             onLog?("🎤 声紋登録: \(speaker)")
         }
 
@@ -235,15 +187,14 @@ class VoiceDiarizer {
         case .neural:
             onLog?("   📊 ECAPA-TDNN 埋め込み \(featureDimension)次元")
         case .mfcc:
-            let pitchIdx = numMFCC * 3
-            let meanF0 = features[pitchIdx] * (pitchNormMax - pitchNormMin) + pitchNormMin
-            let stdF0 = features[pitchIdx + 1] * (pitchNormMax - pitchNormMin)
+            let pitchIdx = mfccExtractor.numMFCC * 3
+            let meanF0 = features[pitchIdx] * (mfccExtractor.pitchNormMax - mfccExtractor.pitchNormMin) + mfccExtractor.pitchNormMin
+            let stdF0 = features[pitchIdx + 1] * (mfccExtractor.pitchNormMax - mfccExtractor.pitchNormMin)
             onLog?("   📊 ピッチ: 平均\(String(format: "%.0f", meanF0))Hz, 標準偏差\(String(format: "%.0f", stdF0))Hz")
         }
 
-        // 登録後に他プロファイルとの距離を警告
         if mode == .neural {
-            for (otherName, otherProfile) in profiles where otherName != speaker && otherProfile.mode == .neural {
+            for (otherName, otherProfile) in profileStore.profiles where otherName != speaker && otherProfile.mode == .neural {
                 let sim = cosineSimilarity(features, otherProfile.features)
                 if sim > 0.85 {
                     onLog?("⚠️ 登録警告: \(speaker)と\(otherName)の類似度が\(String(format: "%.3f", sim))で高すぎます")
@@ -251,14 +202,11 @@ class VoiceDiarizer {
             }
         }
 
-        saveProfiles()
+        profileStore.saveProfiles()
     }
 
-    /// 品質検査付き enrollment（P0-2完全版）
-    /// 12秒の生音声から品質チェック → embedding自己一貫性チェック → enroll
     func enrollWithQualityCheck(speaker: String, samples: [Float]) -> (success: Bool, message: String) {
-        // Step 1: 基本品質チェック
-        let quality = AudioQualityEvaluator.evaluate(samples: samples, sampleRate: sampleRate)
+        let quality = AudioQualityEvaluator.evaluate(samples: samples, sampleRate: mfccExtractor.sampleRate)
         if !quality.isSufficientForEnrollment {
             let reasons = quality.enrollmentFailureReasons.joined(separator: "\n")
             onLog?("❌ 登録品質不足: \(speaker)\n\(reasons)")
@@ -267,13 +215,12 @@ class VoiceDiarizer {
 
         onLog?("📊 登録品質: RMS=\(String(format: "%.4f", quality.averageRMS)) 有声率=\(String(format: "%.0f%%", quality.voicedRatio * 100)) 有効\(String(format: "%.1f", quality.effectiveDuration))秒")
 
-        // Step 2: embedding 自己一貫性チェック（ニューラルモード時）
         if mode == .neural {
             if let consistency = AudioQualityEvaluator.evaluateEmbeddingConsistency(
                 samples: samples,
-                sampleRate: sampleRate,
+                sampleRate: mfccExtractor.sampleRate,
                 extractEmbedding: { [weak self] window in
-                    self?.embeddingModel.extractEmbedding(from: window, sampleRate: self?.sampleRate ?? 44100)
+                    self?.embeddingModel.extractEmbedding(from: window, sampleRate: self?.mfccExtractor.sampleRate ?? 44100)
                 }
             ) {
                 onLog?("📊 埋め込み一貫性: 平均=\(String(format: "%.3f", consistency.meanSimilarity)) 最小=\(String(format: "%.3f", consistency.minSimilarity)) (\(consistency.windowCount)窓)")
@@ -288,31 +235,23 @@ class VoiceDiarizer {
             }
         }
 
-        // Step 3: 特徴量抽出 & 登録
-        guard let features = embeddingModel.extractEmbedding(from: samples, sampleRate: sampleRate) else {
+        guard let features = embeddingModel.extractEmbedding(from: samples, sampleRate: mfccExtractor.sampleRate) else {
             return (false, "特徴量の抽出に失敗しました")
         }
 
         enroll(speaker: speaker, features: features)
-
-        // ピッチ統計も登録（複合判定用）
         enrollPitchStats(speaker: speaker, samples: samples)
 
         return (true, "登録完了！品質: RMS=\(String(format: "%.3f", quality.averageRMS)) 有声率=\(String(format: "%.0f%%", quality.voicedRatio * 100))")
     }
 
-    /// 直近の識別に使った生音声サンプル（ピッチ複合判定用）
-    private var lastIdentifySamples: [Float]?
-
-    /// 識別前に生音声をセットする（ピッチ複合判定で使用）
     func setRawSamplesForNextIdentify(_ samples: [Float]) {
         lastIdentifySamples = samples
     }
 
-    /// 音声特徴量から最も近い話者を推定
     func identify(features: [Float]) -> (speaker: String, confidence: Float)? {
         guard features.count == featureDimension else { return nil }
-        guard !profiles.isEmpty else { return nil }
+        guard !profileStore.profiles.isEmpty else { return nil }
 
         switch mode {
         case .neural:
@@ -322,10 +261,9 @@ class VoiceDiarizer {
         }
     }
 
-    /// 確信度レベル付きの識別（ニューラルモード用）
     func identifyWithConfidence(features: [Float]) -> (speaker: String, confidence: Float, level: IdentifyConfidence)? {
         guard features.count == featureDimension else { return nil }
-        guard !profiles.isEmpty else { return nil }
+        guard !profileStore.profiles.isEmpty else { return nil }
         guard mode == .neural else {
             if let r = identifyMFCC(features: features) {
                 return (r.speaker, r.confidence, .strict)
@@ -338,24 +276,17 @@ class VoiceDiarizer {
 
     // MARK: - 適応学習
 
-    private let maxAdaptiveUpdates = 100
-
-    /// 最後の適応学習診断情報（P1-3）
-    private(set) var lastAdaptiveRejectedReason: String?
-
     func adaptiveUpdate(speaker: String, features: [Float]) {
         lastAdaptiveRejectedReason = nil
         guard features.count == featureDimension else { return }
-        guard var profile = profiles[speaker] else { return }
+        guard var profile = profileStore.profiles[speaker] else { return }
         guard profile.mode == mode else { return }
 
-        // 適応学習回数の上限チェック
         if profile.sampleCount > maxAdaptiveUpdates {
             lastAdaptiveRejectedReason = "max_updates_exceeded"
             return
         }
 
-        // 確信度チェック
         let shouldUpdate: Bool
         switch mode {
         case .neural:
@@ -375,14 +306,10 @@ class VoiceDiarizer {
         for i in 0..<featureDimension {
             updated[i] = updated[i] * (1 - alpha) + features[i] * alpha
         }
+        if mode == .neural { updated = l2Normalize(updated) }
 
         if mode == .neural {
-            updated = l2Normalize(updated)
-        }
-
-        // ドリフトガード
-        if mode == .neural {
-            for (otherName, otherProfile) in profiles where otherName != speaker && otherProfile.mode == .neural {
+            for (otherName, otherProfile) in profileStore.profiles where otherName != speaker && otherProfile.mode == .neural {
                 let simAfter = cosineSimilarity(updated, otherProfile.features)
                 if simAfter > 0.92 {
                     lastAdaptiveRejectedReason = "drift_guard(\(otherName):\(String(format: "%.3f", simAfter)))"
@@ -394,20 +321,21 @@ class VoiceDiarizer {
 
         profile.features = updated
         profile.sampleCount += 1
-        profiles[speaker] = profile
+        profileStore.profiles[speaker] = profile
 
         if profile.sampleCount % 50 == 0 {
-            onLog?("🔄 声紋適応更新: \(speaker)（累計\(profile.sampleCount)サンプル）")
-            saveProfiles()
+            onLog?("🔄 声紋適応更新: \(speaker)（累計\(profile.sampleCount)サ���プル）")
+            profileStore.saveProfiles()
         }
     }
 
-    // MARK: - ニューラル識別（構造化ログ付き）
+    // MARK: - ニューラル識別
 
     private func identifyNeural(features: [Float]) -> (result: (speaker: String, confidence: Float), level: IdentifyConfidence)? {
+        setupSubcomponentLogs()
         var results: [(name: String, similarity: Float)] = []
 
-        for (name, profile) in profiles {
+        for (name, profile) in profileStore.profiles {
             guard profile.mode == .neural else { continue }
             let sim = cosineSimilarity(features, profile.features)
             results.append((name, sim))
@@ -416,35 +344,21 @@ class VoiceDiarizer {
         guard !results.isEmpty else { return nil }
         results.sort { $0.similarity > $1.similarity }
 
-        // スコア履歴を更新
         for r in results {
-            scoreHistory[r.name, default: []].append(r.similarity)
-            if scoreHistory[r.name]!.count > scoreHistoryMaxSize {
-                scoreHistory[r.name]!.removeFirst()
-            }
+            voting.updateScoreHistory(speaker: r.name, score: r.similarity)
         }
 
         let scoreStr = results.map { "\($0.name):\(String(format: "%.3f", $0.similarity))" }.joined(separator: " ")
         onLog?("🔍 声紋照合(neural): \(scoreStr)")
 
-        // --- スコア正規化 ---
-        // 各話者の「普段のスコア」を基準に、今のスコアがどれだけ高いかを評価
-        // もりけんが常に0.95+出すなら、0.96は「普通」。takaが普段0.70なら、0.90は「異常に高い」
-        var normalizedResults: [(name: String, similarity: Float, rawSimilarity: Float)] = []
-        let hasEnoughHistory = results.allSatisfy { (scoreHistory[$0.name]?.count ?? 0) >= 5 }
+        // スコア正規化
+        let speakerNames = results.map { $0.name }
+        let hasEnoughHistory = voting.hasEnoughHistory(for: speakerNames)
 
+        var normalizedResults: [(name: String, similarity: Float, rawSimilarity: Float)] = []
         if hasEnoughHistory && results.count >= 2 {
             for r in results {
-                let history = scoreHistory[r.name]!
-                let mean = history.reduce(0, +) / Float(history.count)
-                let variance = history.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(history.count)
-                let std = max(sqrtf(variance), 0.01)  // 0除算防止
-
-                // Z-score: 今のスコアが平均からどれだけ偏差しているか
-                let zScore = (r.similarity - mean) / std
-                // 正規化スコア: 元のスコアにZ-scoreのボーナス/ペナルティを加える
-                // Z-scoreが高い = この話者にとって「異常に高いマッチ」 = 本人の可能性が高い
-                let normalizedScore = r.similarity + zScore * 0.02  // 重み0.02でブレンド
+                let normalizedScore = voting.normalizeScore(speaker: r.name, rawScore: r.similarity)
                 normalizedResults.append((r.name, normalizedScore, r.similarity))
             }
             normalizedResults.sort { $0.similarity > $1.similarity }
@@ -457,19 +371,17 @@ class VoiceDiarizer {
         let margin = second != nil ? best.similarity - second!.similarity : Float(1.0)
         let rawBestSim = best.rawSimilarity
 
-        // 正規化でランキングが変わった場合ログ出力
         if hasEnoughHistory && results.count >= 2 && results[0].name != normalizedResults[0].name {
             onLog?("📊 スコア正規化で順位変動: \(results[0].name)→\(normalizedResults[0].name)")
         }
 
-        // --- 判定ロジック ---
+        // 判定ロジック
         var decisionType: String
         var finalDecision: String
         var unknownReason: UnknownReason? = nil
         var returnValue: (result: (speaker: String, confidence: Float), level: IdentifyConfidence)? = nil
 
-        // --- ピッチ補助判定 ---
-        // マージンがまだ不足する場合、ピッチで追加ブースト
+        // ピッチ補助判定
         var effectiveBest = best
         var effectiveSecond = second
         var effectiveMargin = margin
@@ -478,8 +390,9 @@ class VoiceDiarizer {
         if let rawSamples = lastIdentifySamples, normalizedResults.count >= 2, margin < similarityMargin {
             var pitchScores: [String: Float] = [:]
             for r in normalizedResults {
-                if let profile = profiles[r.name], profile.pitchMean != nil {
-                    pitchScores[r.name] = pitchMatchScore(samples: rawSamples, profile: profile) ?? 0.5
+                if let profile = profileStore.profiles[r.name], let pm = profile.pitchMean, let ps = profile.pitchStd {
+                    pitchScores[r.name] = mfccExtractor.pitchMatchScore(
+                        samples: rawSamples, profilePitchMean: pm, profilePitchStd: ps) ?? 0.5
                 }
             }
             if pitchScores.count >= 2 {
@@ -503,21 +416,21 @@ class VoiceDiarizer {
             decisionType = "unknown"
             finalDecision = "不明"
             unknownReason = .belowMinSimilarity
-            addVote(speaker: "不明", score: 0)
+            voting.addVote(speaker: "不明", score: 0)
         } else if normalizedResults.count <= 1 || effectiveMargin >= similarityMargin {
             decisionType = pitchUsed ? "strict+pitch" : (hasEnoughHistory && results[0].name != normalizedResults[0].name ? "strict+norm" : "strict")
             finalDecision = effectiveBest.name
-            addVote(speaker: effectiveBest.name, score: rawBestSim)
+            voting.addVote(speaker: effectiveBest.name, score: rawBestSim)
             returnValue = ((effectiveBest.name, rawBestSim), (pitchUsed || hasEnoughHistory && results[0].name != normalizedResults[0].name) ? .estimated : .strict)
         } else if effectiveMargin >= softMargin {
             decisionType = "soft"
-            addVote(speaker: effectiveBest.name, score: rawBestSim)
+            voting.addVote(speaker: effectiveBest.name, score: rawBestSim)
             onLog?("⚠️ マージン不足: \(effectiveBest.name)(\(String(format: "%.3f", effectiveBest.similarity))) vs \(effectiveSecond!.name)(\(String(format: "%.3f", effectiveSecond!.similarity))) margin=\(String(format: "%.3f", effectiveMargin))")
 
-            if let voted = resolveByVoting() {
+            if let voted = voting.resolveByVoting() {
                 decisionType = "voted"
                 finalDecision = voted.speaker
-                onLog?("🗳 多数決で判定: \(voted.speaker)（\(voted.count)/\(votingWindowSize)票）")
+                onLog?("🗳 多数決で判定: \(voted.speaker)（\(voted.count)/\(voting.votingWindowSize)票）")
                 returnValue = ((voted.speaker, rawBestSim), .estimated)
             } else {
                 finalDecision = "不明"
@@ -527,12 +440,12 @@ class VoiceDiarizer {
             decisionType = "unknown"
             finalDecision = "不明"
             unknownReason = .belowMargin
-            addVote(speaker: "不明", score: 0)
+            voting.addVote(speaker: "不明", score: 0)
             onLog?("⚠️ マージン不足: \(effectiveBest.name)(\(String(format: "%.3f", effectiveBest.similarity))) vs \(effectiveSecond!.name)(\(String(format: "%.3f", effectiveSecond!.similarity))) margin=\(String(format: "%.3f", effectiveMargin))")
         }
 
-        // --- 構造化ログ出力（P0-1）---
-        if diagnosticsEnabled {
+        // 構造化ログ
+        if profileStore.diagnosticsEnabled {
             let event = IdentificationDebugEvent(
                 timestamp: Date(),
                 mode: "neural",
@@ -542,131 +455,17 @@ class VoiceDiarizer {
                 secondSimilarity: second?.similarity,
                 margin: margin,
                 decisionType: decisionType,
-                recentVotes: recentVotes.map { $0.speaker },
+                recentVotes: voting.recentVotes.map { $0.speaker },
                 finalDecision: finalDecision,
                 unknownReason: unknownReason?.rawValue,
-                adaptiveUpdated: false,  // 呼び出し側で設定
+                adaptiveUpdated: false,
                 adaptiveRejectedReason: nil,
                 inputQuality: nil
             )
-            writeDiagnosticEvent(event)
+            profileStore.writeDiagnosticEvent(event)
         }
 
         return returnValue
-    }
-
-    // MARK: - Temporal Voting（P1-2改良版）
-
-    /// 直前の1位話者を追跡
-    private var lastTopSpeaker: String = ""
-    /// 話者切替候補カウンター（P1-2: 2回連続で確認してからリセット）
-    private var switchCandidateCount = 0
-    private var switchCandidateSpeaker: String = ""
-
-    private func addVote(speaker: String, score: Float) {
-        // P1-2改良: 即座にリセットせず、2回連続で新しい話者が来たらリセット
-        if speaker != "不明" && speaker != lastTopSpeaker && !lastTopSpeaker.isEmpty {
-            if speaker == switchCandidateSpeaker {
-                switchCandidateCount += 1
-            } else {
-                switchCandidateSpeaker = speaker
-                switchCandidateCount = 1
-            }
-
-            // 2回連続で異なる話者 → 本当の話者交代と判定してリセット
-            if switchCandidateCount >= 2 {
-                recentVotes.removeAll()
-                lastTopSpeaker = speaker
-                switchCandidateCount = 0
-                switchCandidateSpeaker = ""
-                onLog?("🔄 話者交代検出: → \(speaker)")
-            }
-        } else if speaker != "不明" {
-            lastTopSpeaker = speaker
-            switchCandidateCount = 0
-            switchCandidateSpeaker = ""
-        }
-
-        recentVotes.append((speaker: speaker, score: score))
-        if recentVotes.count > votingWindowSize {
-            recentVotes.removeFirst()
-        }
-    }
-
-    private func resolveByVoting() -> (speaker: String, count: Int)? {
-        guard recentVotes.count >= votingMinCount else { return nil }
-
-        var counts: [String: Int] = [:]
-        for vote in recentVotes where vote.speaker != "不明" {
-            counts[vote.speaker, default: 0] += 1
-        }
-
-        guard let winner = counts.max(by: { $0.value < $1.value }),
-              winner.value >= votingMinCount else {
-            return nil
-        }
-
-        return (speaker: winner.key, count: winner.value)
-    }
-
-    func clearVotingHistory() {
-        recentVotes.removeAll()
-        lastTopSpeaker = ""
-        switchCandidateCount = 0
-        switchCandidateSpeaker = ""
-    }
-
-    // MARK: - プロファイル診断（P1-4: 任意タイミングで実行可能）
-
-    /// 登録済みプロファイル間のコサイン類似度を診断ログに出力
-    func diagnoseProfiles() {
-        guard mode == .neural else { return }
-        let names = Array(profiles.keys).sorted()
-        guard names.count >= 2 else {
-            onLog?("📊 プロファイル診断: 登録者\(names.count)名（比較不要）")
-            return
-        }
-
-        onLog?("📊 === プロファイル間類似度診断 ===")
-        for i in 0..<names.count {
-            for j in (i+1)..<names.count {
-                guard let p1 = profiles[names[i]], let p2 = profiles[names[j]] else { continue }
-                let sim = cosineSimilarity(p1.features, p2.features)
-                let status: String
-                if sim > 0.90 {
-                    status = "🔴 危険（プロファイル収束の疑い）"
-                } else if sim > 0.80 {
-                    status = "🟡 要注意"
-                } else {
-                    status = "🟢 正常"
-                }
-                onLog?("   \(names[i]) ↔ \(names[j]): \(String(format: "%.4f", sim)) \(status)")
-            }
-            if let p = profiles[names[i]] {
-                let pitchStr = p.pitchMean != nil ? ", ピッチ=\(String(format: "%.0f", p.pitchMean!))Hz±\(String(format: "%.0f", p.pitchStd ?? 0))Hz" : ""
-                onLog?("   \(names[i]): サンプル数=\(p.sampleCount), 適応学習残り=\(max(0, maxAdaptiveUpdates - p.sampleCount))回\(pitchStr)")
-            }
-        }
-        onLog?("📊 ========================")
-    }
-
-    /// プロファイルの健全性サマリーを返す（UIに表示用）
-    func profileHealthSummary() -> [(speaker: String, sampleCount: Int, nearestOther: String?, nearestSimilarity: Float?)] {
-        var summary: [(speaker: String, sampleCount: Int, nearestOther: String?, nearestSimilarity: Float?)] = []
-        for (name, profile) in profiles {
-            var nearest: (String, Float)? = nil
-            for (otherName, otherProfile) in profiles where otherName != name {
-                let sim = mode == .neural
-                    ? cosineSimilarity(profile.features, otherProfile.features)
-                    : 1.0 / (1.0 + euclideanDistance(profile.features, otherProfile.features))
-                if nearest == nil || sim > nearest!.1 {
-                    nearest = (otherName, sim)
-                }
-            }
-            summary.append((speaker: name, sampleCount: profile.sampleCount,
-                            nearestOther: nearest?.0, nearestSimilarity: nearest?.1))
-        }
-        return summary.sorted { $0.speaker < $1.speaker }
     }
 
     // MARK: - MFCCモード識別
@@ -674,7 +473,7 @@ class VoiceDiarizer {
     private func identifyMFCC(features: [Float]) -> (speaker: String, confidence: Float)? {
         var results: [(name: String, distance: Float)] = []
 
-        for (name, profile) in profiles {
+        for (name, profile) in profileStore.profiles {
             let dist = euclideanDistance(features, profile.features)
             results.append((name, dist))
         }
@@ -684,9 +483,7 @@ class VoiceDiarizer {
         let scoreStr = results.map { "\($0.name):\(String(format: "%.2f", $0.distance))" }.joined(separator: " ")
         onLog?("🔍 声紋照合(mfcc): \(scoreStr)")
 
-        guard let best = results.first, best.distance <= maxDistance else {
-            return nil
-        }
+        guard let best = results.first, best.distance <= maxDistance else { return nil }
 
         if results.count >= 2 {
             let ratio = results[1].distance / max(best.distance, 0.001)
@@ -700,165 +497,13 @@ class VoiceDiarizer {
         return (best.name, confidence)
     }
 
-    // MARK: - プロファイル管理
+    // MARK: - ピッチ統計
 
-    var registeredSpeakers: [String] {
-        Array(profiles.keys)
-    }
-
-    func clearProfile(for speaker: String) {
-        profiles.removeValue(forKey: speaker)
-        saveProfiles()
-    }
-
-    func clearAllProfiles() {
-        profiles.removeAll()
-        clearVotingHistory()
-        saveProfiles()
-    }
-
-    // MARK: - 構造化診断ログ出力（P0-1: JSONL）
-
-    private lazy var diagnosticsURL: URL = {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("GravityReader/diagnostics")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("identify.jsonl")
-    }()
-
-    private let diagnosticsEncoder: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        return encoder
-    }()
-
-    private func writeDiagnosticEvent(_ event: IdentificationDebugEvent) {
-        guard diagnosticsEnabled else { return }
-        guard let data = try? diagnosticsEncoder.encode(event),
-              let line = String(data: data, encoding: .utf8) else { return }
-
-        let lineWithNewline = line + "\n"
-        if let handle = try? FileHandle(forWritingTo: diagnosticsURL) {
-            handle.seekToEndOfFile()
-            handle.write(lineWithNewline.data(using: .utf8)!)
-            handle.closeFile()
-        } else {
-            try? lineWithNewline.write(to: diagnosticsURL, atomically: true, encoding: .utf8)
-        }
-    }
-
-    // MARK: - 特徴量抽出（MFCC 39次元）— フォールバック用
-
-    private func extractFullFeatures(from samples: [Float]) -> [Float]? {
-        let numFrames = (samples.count - fftSize) / hopSize + 1
-        guard numFrames > 0 else { return nil }
-
-        var allMFCCs = [[Float]]()
-        var pitchValues = [Float]()
-
-        for frameIdx in 0..<numFrames {
-            let start = frameIdx * hopSize
-            let frame = Array(samples[start..<start + fftSize])
-
-            let windowed = applyHammingWindow(frame)
-            guard let powerSpectrum = computePowerSpectrum(windowed) else { continue }
-            let melEnergies = applyMelFilterBank(powerSpectrum)
-            let logMelEnergies = melEnergies.map { logf(max($0, 1e-10)) }
-            let mfccFull = applyDCT(logMelEnergies)
-            let mfcc = Array(mfccFull[mfccStart..<numMFCCRaw])
-            allMFCCs.append(mfcc)
-
-            if let f0 = estimatePitch(frame) {
-                pitchValues.append(f0)
-            }
-        }
-
-        guard allMFCCs.count >= 2 else { return nil }
-
-        let count = Float(allMFCCs.count)
-
-        var mean = [Float](repeating: 0, count: numMFCC)
-        for mfcc in allMFCCs {
-            for i in 0..<numMFCC { mean[i] += mfcc[i] }
-        }
-        for i in 0..<numMFCC { mean[i] /= count }
-
-        var std = [Float](repeating: 0, count: numMFCC)
-        for mfcc in allMFCCs {
-            for i in 0..<numMFCC {
-                let diff = mfcc[i] - mean[i]
-                std[i] += diff * diff
-            }
-        }
-        for i in 0..<numMFCC { std[i] = sqrtf(std[i] / count) }
-
-        var deltaMean = [Float](repeating: 0, count: numMFCC)
-        for f in 1..<allMFCCs.count {
-            for i in 0..<numMFCC { deltaMean[i] += allMFCCs[f][i] - allMFCCs[f - 1][i] }
-        }
-        let deltaCount = Float(allMFCCs.count - 1)
-        for i in 0..<numMFCC { deltaMean[i] /= deltaCount }
-
-        var pitchMean: Float = 0
-        var pitchStd: Float = 0
-        var pitchRange: Float = 0
-
-        if pitchValues.count >= 2 {
-            let pSum = pitchValues.reduce(0, +)
-            pitchMean = pSum / Float(pitchValues.count)
-
-            var pVarSum: Float = 0
-            for p in pitchValues { pVarSum += (p - pitchMean) * (p - pitchMean) }
-            pitchStd = sqrtf(pVarSum / Float(pitchValues.count))
-
-            let pMin = pitchValues.min() ?? 0
-            let pMax = pitchValues.max() ?? 0
-            pitchRange = pMax - pMin
-
-            pitchMean = (pitchMean - pitchNormMin) / (pitchNormMax - pitchNormMin)
-            pitchStd = pitchStd / (pitchNormMax - pitchNormMin)
-            pitchRange = pitchRange / (pitchNormMax - pitchNormMin)
-        }
-
-        let pitchWeight: Float = 5.0
-        let pitchFeatures = [pitchMean * pitchWeight, pitchStd * pitchWeight, pitchRange * pitchWeight]
-
-        return mean + std + deltaMean + pitchFeatures
-    }
-
-    // MARK: - ピッチ統計計算（複合判定用）
-
-    /// 音声サンプルからピッチ統計（平均F0, 標準偏差）を計算
-    func computePitchStats(from samples: [Float]) -> (mean: Float, std: Float)? {
-        let frameSize = 2048
-        let hopSize = 512
-        var pitches: [Float] = []
-
-        var i = 0
-        while i + frameSize <= samples.count {
-            let frame = Array(samples[i..<(i + frameSize)])
-            if let f0 = estimatePitch(frame) {
-                pitches.append(f0)
-            }
-            i += hopSize
-        }
-
-        guard pitches.count >= 3 else { return nil }  // 最低3フレーム必要
-
-        let mean = pitches.reduce(0, +) / Float(pitches.count)
-        let variance = pitches.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(pitches.count)
-        let std = sqrtf(variance)
-
-        return (mean, std)
-    }
-
-    /// 登録時にピッチ統計も保存
     func enrollPitchStats(speaker: String, samples: [Float]) {
-        guard var profile = profiles[speaker] else { return }
+        guard var profile = profileStore.profiles[speaker] else { return }
 
-        if let stats = computePitchStats(from: samples) {
+        if let stats = mfccExtractor.computePitchStats(from: samples) {
             if let existingMean = profile.pitchMean {
-                // EMAでブレンド
                 let alpha: Float = 0.3
                 profile.pitchMean = existingMean * (1 - alpha) + stats.mean * alpha
                 profile.pitchStd = (profile.pitchStd ?? stats.std) * (1 - alpha) + stats.std * alpha
@@ -866,201 +511,85 @@ class VoiceDiarizer {
                 profile.pitchMean = stats.mean
                 profile.pitchStd = stats.std
             }
-            profiles[speaker] = profile
+            profileStore.profiles[speaker] = profile
             onLog?("   🎵 ピッチ: 平均\(String(format: "%.0f", profile.pitchMean!))Hz, 標準偏差\(String(format: "%.0f", profile.pitchStd!))Hz")
-            saveProfiles()
+            profileStore.saveProfiles()
         }
     }
 
-    /// リアルタイム音声からピッチスコアを計算（0.0-1.0、高いほど一致）
-    private func pitchMatchScore(samples: [Float], profile: VoiceProfile) -> Float? {
-        guard let profileMean = profile.pitchMean,
-              let profileStd = profile.pitchStd else { return nil }
+    // MARK: - プロファイル管理（委譲）
 
-        guard let currentStats = computePitchStats(from: samples) else { return nil }
-
-        // 平均ピッチの差をプロファイルのstdでスケーリング
-        let diff = abs(currentStats.mean - profileMean)
-        let tolerance = max(profileStd * 2.0, 30.0)  // 最低30Hz幅の許容
-
-        // ガウシアンスコア: exp(-diff^2 / (2*tolerance^2))
-        let score = expf(-(diff * diff) / (2 * tolerance * tolerance))
-        return score
+    func clearProfile(for speaker: String) { profileStore.clearProfile(for: speaker) }
+    func clearAllProfiles() {
+        profileStore.clearAllProfiles()
+        voting.clearVotingHistory()
     }
+    func clearVotingHistory() { voting.clearVotingHistory() }
+    func saveProfiles() { profileStore.saveProfiles() }
+    func loadProfiles() { profileStore.loadProfiles(currentMode: mode, featureDimension: featureDimension) }
+    func resetAdaptiveLearning(for speaker: String) { profileStore.resetAdaptiveLearning(for: speaker) }
 
-    // MARK: - ピッチ推定（自己相関法）
+    // MARK: - プロファイル診断
 
-    private func estimatePitch(_ frame: [Float]) -> Float? {
-        let n = frame.count
+    func diagnoseProfiles() {
+        guard mode == .neural else { return }
+        let names = Array(profileStore.profiles.keys).sorted()
+        guard names.count >= 2 else {
+            onLog?("📊 プロファイル診断: 登録者\(names.count)���（比較不要）")
+            return
+        }
 
-        var rms: Float = 0
-        vDSP_rmsqv(frame, 1, &rms, vDSP_Length(n))
-        guard rms > 0.01 else { return nil }
-
-        let minLag = Int(sampleRate / pitchMaxFreq)
-        let maxLag = Int(sampleRate / pitchMinFreq)
-        guard maxLag < n else { return nil }
-
-        var bestLag = 0
-        var bestCorr: Float = -1
-
-        for lag in minLag...maxLag {
-            let length = n - lag
-
-            var corr: Float = 0
-            var n1: Float = 0
-            var n2: Float = 0
-            frame.withUnsafeBufferPointer { buf1 in
-                let ptr1 = buf1.baseAddress!
-                let ptr2 = ptr1.advanced(by: lag)
-                vDSP_dotpr(ptr1, 1, ptr2, 1, &corr, vDSP_Length(length))
-                vDSP_dotpr(ptr1, 1, ptr1, 1, &n1, vDSP_Length(length))
-                vDSP_dotpr(ptr2, 1, ptr2, 1, &n2, vDSP_Length(length))
+        onLog?("📊 === プロファイル間類似度診断 ===")
+        for i in 0..<names.count {
+            for j in (i+1)..<names.count {
+                guard let p1 = profileStore.profiles[names[i]], let p2 = profileStore.profiles[names[j]] else { continue }
+                let sim = cosineSimilarity(p1.features, p2.features)
+                let status: String
+                if sim > 0.90 {
+                    status = "🔴 危険（プロファイル収束の疑い）"
+                } else if sim > 0.80 {
+                    status = "🟡 要注意"
+                } else {
+                    status = "🟢 正常"
+                }
+                onLog?("   \(names[i]) ↔ \(names[j]): \(String(format: "%.4f", sim)) \(status)")
             }
-
-            let denom = sqrtf(n1 * n2)
-            guard denom > 0 else { continue }
-            let correlation = corr / denom
-
-            if correlation > bestCorr {
-                bestCorr = correlation
-                bestLag = lag
+            if let p = profileStore.profiles[names[i]] {
+                let pitchStr = p.pitchMean != nil ? ", ピッチ=\(String(format: "%.0f", p.pitchMean!))Hz±\(String(format: "%.0f", p.pitchStd ?? 0))Hz" : ""
+                onLog?("   \(names[i]): サンプル数=\(p.sampleCount), 適応学習残り=\(max(0, maxAdaptiveUpdates - p.sampleCount))回\(pitchStr)")
             }
         }
-
-        guard bestCorr > 0.3, bestLag > 0 else { return nil }
-
-        let f0 = sampleRate / Float(bestLag)
-        return f0
+        onLog?("📊 ========================")
     }
 
-    // MARK: - 信号処理ヘルパー
-
-    private func applyHammingWindow(_ frame: [Float]) -> [Float] {
-        var result = frame
-        let n = Float(frame.count)
-        for i in 0..<frame.count {
-            let w = 0.54 - 0.46 * cosf(2 * .pi * Float(i) / (n - 1))
-            result[i] *= w
-        }
-        return result
-    }
-
-    private func computePowerSpectrum(_ frame: [Float]) -> [Float]? {
-        let n = frame.count
-        let halfN = n / 2
-        let log2n = vDSP_Length(log2f(Float(n)))
-
-        guard let setup = fftSetup else { return nil }
-
-        var realp = [Float](repeating: 0, count: halfN)
-        var imagp = [Float](repeating: 0, count: halfN)
-
-        frame.withUnsafeBufferPointer { buf in
-            buf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfN) { complexPtr in
-                var split = DSPSplitComplex(realp: &realp, imagp: &imagp)
-                vDSP_ctoz(complexPtr, 2, &split, 1, vDSP_Length(halfN))
+    func profileHealthSummary() -> [(speaker: String, sampleCount: Int, nearestOther: String?, nearestSimilarity: Float?)] {
+        var summary: [(speaker: String, sampleCount: Int, nearestOther: String?, nearestSimilarity: Float?)] = []
+        for (name, profile) in profileStore.profiles {
+            var nearest: (String, Float)? = nil
+            for (otherName, otherProfile) in profileStore.profiles where otherName != name {
+                let sim = mode == .neural
+                    ? cosineSimilarity(profile.features, otherProfile.features)
+                    : 1.0 / (1.0 + euclideanDistance(profile.features, otherProfile.features))
+                if nearest == nil || sim > nearest!.1 {
+                    nearest = (otherName, sim)
+                }
             }
+            summary.append((speaker: name, sampleCount: profile.sampleCount,
+                            nearestOther: nearest?.0, nearestSimilarity: nearest?.1))
         }
-
-        var split = DSPSplitComplex(realp: &realp, imagp: &imagp)
-        vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
-
-        var power = [Float](repeating: 0, count: halfN)
-        vDSP_zvmags(&split, 1, &power, 1, vDSP_Length(halfN))
-
-        var scale = Float(n * n)
-        vDSP_vsdiv(power, 1, &scale, &power, 1, vDSP_Length(halfN))
-
-        return power
-    }
-
-    // MARK: - メルフィルタバンク
-
-    private func hzToMel(_ hz: Float) -> Float {
-        return 2595 * log10f(1 + hz / 700)
-    }
-
-    private func melToHz(_ mel: Float) -> Float {
-        return 700 * (powf(10, mel / 2595) - 1)
-    }
-
-    private func buildMelFilterBank() -> [[Float]] {
-        let halfN = fftSize / 2
-        let melLow = hzToMel(melLowFreq)
-        let melHigh = hzToMel(melHighFreq)
-
-        var melPoints = [Float]()
-        for i in 0...(numMelBands + 1) {
-            let mel = melLow + Float(i) * (melHigh - melLow) / Float(numMelBands + 1)
-            melPoints.append(mel)
-        }
-
-        let binPoints = melPoints.map { mel -> Int in
-            let hz = melToHz(mel)
-            return Int(floorf(hz * Float(fftSize) / sampleRate))
-        }
-
-        var filterBank = [[Float]]()
-        for m in 1...numMelBands {
-            var filter = [Float](repeating: 0, count: halfN)
-            let left = binPoints[m - 1]
-            let center = binPoints[m]
-            let right = binPoints[m + 1]
-
-            for k in left..<center where k < halfN {
-                filter[k] = Float(k - left) / Float(max(center - left, 1))
-            }
-            for k in center..<right where k < halfN {
-                filter[k] = Float(right - k) / Float(max(right - center, 1))
-            }
-            filterBank.append(filter)
-        }
-
-        return filterBank
-    }
-
-    private func applyMelFilterBank(_ powerSpectrum: [Float]) -> [Float] {
-        return melFilterBank.map { filter in
-            var sum: Float = 0
-            vDSP_dotpr(filter, 1, powerSpectrum, 1, &sum, vDSP_Length(min(filter.count, powerSpectrum.count)))
-            return sum
-        }
-    }
-
-    // MARK: - DCT
-
-    private func buildDCTMatrix() -> [[Float]] {
-        var matrix = [[Float]]()
-        for k in 0..<numMFCCRaw {
-            var row = [Float]()
-            for n in 0..<numMelBands {
-                let val = cosf(.pi * Float(k) * (Float(n) + 0.5) / Float(numMelBands))
-                row.append(val)
-            }
-            matrix.append(row)
-        }
-        return matrix
-    }
-
-    private func applyDCT(_ logMelEnergies: [Float]) -> [Float] {
-        return dctMatrix.map { row in
-            var sum: Float = 0
-            vDSP_dotpr(row, 1, logMelEnergies, 1, &sum, vDSP_Length(min(row.count, logMelEnergies.count)))
-            return sum
-        }
+        return summary.sorted { $0.speaker < $1.speaker }
     }
 
     // MARK: - 距離・類似度計算
 
-    private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
+    func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
         guard a.count == b.count, !a.isEmpty else { return 0 }
         var dot: Float = 0
         vDSP_dotpr(a, 1, b, 1, &dot, vDSP_Length(a.count))
         return dot
     }
 
-    private func l2Normalize(_ vec: [Float]) -> [Float] {
+    func l2Normalize(_ vec: [Float]) -> [Float] {
         var norm: Float = 0
         vDSP_svesq(vec, 1, &norm, vDSP_Length(vec.count))
         norm = sqrtf(norm)
@@ -1079,73 +608,5 @@ class VoiceDiarizer {
             sumSq += diff * diff
         }
         return sqrtf(sumSq)
-    }
-
-    // MARK: - 永続化
-
-    private var profilesURL: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("GravityReader")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("voice_profiles.json")
-    }
-
-    func saveProfiles() {
-        var data: [[String: Any]] = []
-        for (_, profile) in profiles {
-            var dict: [String: Any] = [
-                "name": profile.name,
-                "features": profile.features.map { Double($0) },
-                "featureDim": profile.features.count,
-                "sampleCount": profile.sampleCount,
-                "mode": profile.mode == .neural ? "neural" : "mfcc"
-            ]
-            if let pm = profile.pitchMean { dict["pitchMean"] = Double(pm) }
-            if let ps = profile.pitchStd { dict["pitchStd"] = Double(ps) }
-            data.append(dict)
-        }
-        if let json = try? JSONSerialization.data(withJSONObject: data),
-           let str = String(data: json, encoding: .utf8) {
-            try? str.write(to: profilesURL, atomically: true, encoding: .utf8)
-        }
-    }
-
-    func loadProfiles() {
-        guard let data = try? Data(contentsOf: profilesURL),
-              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
-
-        for item in arr {
-            guard let name = item["name"] as? String,
-                  let count = item["sampleCount"] as? Int else { continue }
-
-            let profileMode: Mode = (item["mode"] as? String) == "neural" ? .neural : .mfcc
-            let pitchMean = (item["pitchMean"] as? Double).map { Float($0) }
-            let pitchStd = (item["pitchStd"] as? Double).map { Float($0) }
-
-            if let feats = item["features"] as? [Double], feats.count == featureDimension, profileMode == mode {
-                profiles[name] = VoiceProfile(
-                    name: name,
-                    features: feats.map { Float($0) },
-                    sampleCount: count,
-                    mode: profileMode,
-                    pitchMean: pitchMean,
-                    pitchStd: pitchStd
-                )
-            } else {
-                onLog?("⚠️ \(name) の声紋は現在のモード(\(mode == .neural ? "neural" : "mfcc"))と互換性がないため再登録が必要です")
-            }
-        }
-        if !profiles.isEmpty {
-            onLog?("🎤 声紋プロファイル読み込み(\(mode == .neural ? "neural" : "mfcc")): \(profiles.keys.joined(separator: ", "))")
-            diagnoseProfiles()
-        }
-    }
-
-    func resetAdaptiveLearning(for speaker: String) {
-        guard var profile = profiles[speaker] else { return }
-        profile.sampleCount = 1
-        profiles[speaker] = profile
-        saveProfiles()
-        onLog?("🔄 \(speaker)の適応学習カウンターをリセット")
     }
 }

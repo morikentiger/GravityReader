@@ -1,4 +1,5 @@
 import AppKit
+import GravityReader
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
