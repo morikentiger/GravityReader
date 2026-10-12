@@ -1,6 +1,7 @@
 import AppKit
 
 class GravityCaptureManager {
+    private let jevGate = JevCommentGate()
     private let commentReadoutGuard = CommentReadoutGuard()
     private var statusBar: StatusBarController?
     var logWindow: LogWindowController?
@@ -405,10 +406,12 @@ class GravityCaptureManager {
 
     init(statusBar: StatusBarController) {
         self.statusBar = statusBar
+        jevGate.onLog = { [weak self] message in self?.logWindow?.addEntry(message) }
     }
 
     func start() {
         NSLog("[GR] start() called. logWindow=\(logWindow != nil), statusBar=\(statusBar != nil)")
+        jevGate.reset()
         spokenHistory.removeAll()
         previousSnapshot.removeAll()
         currentParticipants.removeAll()
@@ -440,6 +443,7 @@ class GravityCaptureManager {
     }
 
     func stop() {
+        jevGate.reset()
         timer?.invalidate()
         timer = nil
         speechManager.stop()
@@ -536,12 +540,6 @@ class GravityCaptureManager {
             // AXGenericElement = メッセージ本文
             let text = entry.text
 
-            // コマンド検出はUIノイズ・重複チェックより先に行う（ただし重複実行は防止）
-            if !spokenHistory.contains(text) {
-                if handleVoiceCommand(text) { spokenHistory.insert(text); i += 1; continue }
-                if handleReadingCommand(text) { spokenHistory.insert(text); i += 1; continue }
-            }
-
             if isUINoiseOrSystemMessage(text) {
                 spokenHistory.insert(text)
                 i += 1
@@ -557,40 +555,31 @@ class GravityCaptureManager {
                 continue
             }
 
-            // 入退室メッセージの処理
-            handleJoinLeaveMessage(text)
-
-            statusBar?.setLastRead(text)
-
-            // 声紋登録中は全部止める（読み上げもYUiも）
-            let enrolling = roomTranscription?.isEnrolling ?? false
-
-            // ユーザー別ボイスで読み上げ + ログに発言者を表示
-            if let user = lastDetectedUser {
-                logWindow?.addEntry("[\(user)] \(text)")
-                if !enrolling {
-                    if isTTSEnabled && !YUiSpamFilter.isIgnoredUser(user) {
-                        speechManager.speak(text, forUser: user)
-                    }
-                    // テキストコメントは[コメント]タグ付きで送る（音声と区別）
-                    let commentMsg = "\(user)[コメント]: \(text)"
-                    logWindow?.addEntry("💬 コメント→YUi: \(commentMsg)")
-                    yuiManager?.feedMessage(commentMsg)
-                }
-            } else {
-                logWindow?.addEntry(text)
-                if !enrolling {
-                    if isTTSEnabled {
-                        speechManager.speak(text)
-                    }
-                    let commentMsg = "[コメント]: \(text)"
-                    logWindow?.addEntry("💬 コメント→YUi: \(commentMsg)")
-                    yuiManager?.feedMessage(commentMsg)
-                }
+            let user = lastDetectedUser
+            if roomTranscription?.isEnrolling != true {
+                jevGate.submit(text) { [weak self] in self?.deliverComment(text, user: user) }
             }
 
             i += 1
         }
+    }
+
+    private func deliverComment(_ text: String, user: String?) {
+        guard roomTranscription?.isEnrolling != true else { return }
+        if handleVoiceCommand(text) || handleReadingCommand(text) { return }
+        _ = handleJoinLeaveMessage(text)
+        statusBar?.setLastRead(text)
+        logWindow?.addEntry(user.map { "[\($0)] \(text)" } ?? text)
+        if isTTSEnabled {
+            if let user = user {
+                if !YUiSpamFilter.isIgnoredUser(user) { speechManager.speak(text, forUser: user) }
+            } else {
+                speechManager.speak(text)
+            }
+        }
+        let commentMsg = "\(user ?? "")[コメント]: \(text)"
+        logWindow?.addEntry("💬 コメント→YUi: \(commentMsg)")
+        yuiManager?.feedMessage(commentMsg)
     }
 
     // MARK: - Accessibility

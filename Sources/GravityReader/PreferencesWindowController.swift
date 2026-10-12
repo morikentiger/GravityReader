@@ -107,6 +107,10 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         tabView.addTabViewItem(makeYUiTab())
         tabView.addTabViewItem(makeVoiceTab())
         tabView.addTabViewItem(makeFishAudioTab())
+        let jevTab = NSTabViewItem(identifier: "jev")
+        jevTab.label = "Jev"
+        jevTab.view = JevSettingsView()
+        tabView.addTabViewItem(jevTab)
         tabView.addTabViewItem(makeNotificationTab())
         tabView.addTabViewItem(makeDictionaryTab())
 
