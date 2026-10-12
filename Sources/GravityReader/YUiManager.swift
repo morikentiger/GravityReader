@@ -24,6 +24,7 @@ class YUiManager {
     // MARK: - バッファ
 
     /// 未処理の新着メッセージバッファ
+    private let abuseGuard = YUiAbuseGuard()
     private var messageBuffer: [(timestamp: Date, text: String)] = []
 
     // MARK: - 発言量トラッキング & 長文クールタイム
@@ -50,17 +51,7 @@ class YUiManager {
 
     /// 相手の発言量に応じた応答長ガイド
     private var responseLengthGuide: String {
-        if canRespondLong {
-            return "相手がたくさん話してくれたので、今回は2〜3文でしっかり返してOK。自分の経験や感想を交えて。"
-        }
-        let chars = userCharsSinceLastResponse
-        if chars < 30 {
-            return "超短文で返す。10〜20文字。「いいね」「わかる」「それな」くらい。"
-        } else if chars < 80 {
-            return "短めに1文で返す。20〜40文字。"
-        } else {
-            return "1〜2文で返す。30〜50文字。"
-        }
+        "必ず1文、10〜40文字で返す。一番伝えたいことだけを言い、話題を足さない。"
     }
 
     // MARK: - すねる・甘えるシステム
@@ -159,6 +150,14 @@ class YUiManager {
     }
 
     // MARK: - タイマー
+
+    private var responseInFlight = false
+    private var listenUntil = Date.distantPast
+
+    /// 再生終了から8秒は人が話せる時間を確保する。
+    func playbackDidFinish() {
+        listenUntil = Date().addingTimeInterval(8)
+    }
 
     private var responseTimer: DispatchWorkItem?
     private var idleTimer: Timer?
@@ -469,7 +468,7 @@ class YUiManager {
 
     /// ユーザーが来た時に再会イベントを発火
     func onUserJoined(_ user: String) {
-        guard !greetedUsers.contains(user) else { return }
+        guard isEnabled, !responseInFlight, Date() >= listenUntil, isSpeakingChecker?() != true, !YUiSpamFilter.isIgnoredUser(user), !greetedUsers.contains(user) else { return }
         greetedUsers.insert(user)
 
         guard let memory = memoryManager.getUserMemory(for: user), !memory.isEmpty, hasAPIKey else { return }
@@ -495,9 +494,12 @@ class YUiManager {
         ]
         messages.append(["role": "user", "content": userMsg])
 
+        responseInFlight = true
         apiClient.callRaw(messages: messages) { [weak self] response in
             DispatchQueue.main.async {
-                guard let self = self, let response = response else { return }
+                guard let self = self else { return }
+                self.responseInFlight = false
+                guard self.isEnabled, let response = response else { self.resetIdleTimer(); return }
                 self.memoryManager.conversationMemory.append((timestamp: Date(), text: "YUi: \(response)"))
                 self.memoryManager.myResponseHistory.append(response)
                 if self.memoryManager.myResponseHistory.count > self.memoryManager.maxResponseHistory {
@@ -515,7 +517,7 @@ class YUiManager {
         if text.hasPrefix("[システム]") { return }
         if text.hasPrefix("もりけん:") || text.hasPrefix("もりけん：") { return }
         if text.hasSuffix("[不適切]") { return }
-        if isAizuchiInFlight { return }
+        if isAizuchiInFlight || responseInFlight || Date() < listenUntil { return }
         if isSpeakingChecker?() == true { return }
 
         messagesSinceLastAizuchi += 1
@@ -550,6 +552,7 @@ class YUiManager {
                 if let aizuchi = response?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !aizuchi.isEmpty {
                     let clean = aizuchi.count > 15 ? String(aizuchi.prefix(15)) : aizuchi
+                    guard !self.responseInFlight, Date() >= self.listenUntil, self.isSpeakingChecker?() != true else { return }
                     self.lastAizuchi = clean
                     self.onAizuchi?(clean)
                 }
@@ -560,7 +563,7 @@ class YUiManager {
     // MARK: - メッセージ受信
 
     func feedMessage(_ text: String) {
-        guard isEnabled else { return }
+        guard isEnabled, !YUiSpamFilter.isIgnoredMessage(text) else { return }
         let isComment = text.contains("[コメント]")
         if isSpeakingChecker?() == true && !isComment { return }
 
@@ -573,7 +576,9 @@ class YUiManager {
         }
 
         let spamLevel = YUiSpamFilter.detectSpamLevel(messageContent)
-        if spamLevel == .fullSpam {
+        let speaker = text.range(of: ": ").map { String(text[..<$0.lowerBound]) }
+            ?? text.range(of: "： ").map { String(text[..<$0.lowerBound]) } ?? "不明"
+        if abuseGuard.shouldIgnore(speaker: speaker.replacingOccurrences(of: "[コメント]", with: ""), content: messageContent) {
             onLog?("🚫 スパム検出（無視）: \(text.prefix(40))")
             return
         }
@@ -659,6 +664,12 @@ class YUiManager {
     }
 
     private func onIdleFired() {
+        guard isEnabled else { return }
+        // 反応のない自発発話は一度で止め、人からの発言を待つ。
+        guard consecutiveYUiMessages == 0, !responseInFlight, Date() >= listenUntil else {
+            resetIdleTimer()
+            return
+        }
         if !messageBuffer.isEmpty {
             onLog?("💬 アイドル中断 → 未処理メッセージ\(messageBuffer.count)件を処理")
             onTimerFired()
@@ -748,9 +759,12 @@ class YUiManager {
         }
         messages.append(["role": "user", "content": userMsg])
 
+        responseInFlight = true
         apiClient.callRaw(messages: messages) { [weak self] response in
             DispatchQueue.main.async {
-                guard let self = self, let response = response else { return }
+                guard let self = self else { return }
+                self.responseInFlight = false
+                guard self.isEnabled, let response = response else { self.resetIdleTimer(); return }
                 if YUiSpamFilter.isTooSimilarToPast(response, history: self.memoryManager.myResponseHistory) { return }
                 self.memoryManager.conversationMemory.append((timestamp: Date(), text: "YUi: \(response)"))
                 self.memoryManager.myResponseHistory.append(response)
@@ -768,6 +782,7 @@ class YUiManager {
     }
 
     private func buildIdleContext() -> String {
+        memoryManager.conversationMemory.removeAll { YUiSpamFilter.isIgnoredMessage($0.text) || $0.text.hasSuffix("[不適切]") }
         var parts: [String] = []
 
         let fmt = DateFormatter()
@@ -803,14 +818,13 @@ class YUiManager {
     // MARK: - 応答生成
 
     private func onTimerFired() {
-        guard !messageBuffer.isEmpty else { return }
+        guard isEnabled, !messageBuffer.isEmpty else { return }
         guard hasAPIKey else {
             onLog?("⚠️ APIキーが設定されていません")
             return
         }
 
-        let hasComment = messageBuffer.contains { $0.text.contains("[コメント]") }
-        if isSpeakingChecker?() == true && !hasComment {
+        if responseInFlight || isSpeakingChecker?() == true || Date() < listenUntil {
             let work = DispatchWorkItem { [weak self] in
                 self?.onTimerFired()
             }
@@ -833,30 +847,35 @@ class YUiManager {
         let topicPreview = topicSummary.count > 60 ? String(topicSummary.prefix(60)) + "…" : topicSummary
         onLog?("📍 話題: \(topicPreview)")
 
+        // 過去の保存文脈にあるミュート対象も応答材料から除外する。
+        memoryManager.conversationMemory.removeAll { YUiSpamFilter.isIgnoredMessage($0.text) || $0.text.hasSuffix("[不適切]") }
         let context = buildContext(newMessages: newMessages)
 
         onLog?("💭 YUi 考え中...")
 
         let messages = buildStreamingMessages(context: context)
-        var isFirstSentence = true
+        responseInFlight = true
+        var spokenText: String?
 
         apiClient.callStreaming(messages: messages, onSentence: { [weak self] sentence in
-            guard let self = self else { return }
-            if isFirstSentence {
-                if YUiSpamFilter.isTooSimilarToPast(sentence, history: self.memoryManager.myResponseHistory) {
-                    NSLog("[YUi] Skipped similar response (streaming): \(sentence)")
-                    return
-                }
-                isFirstSentence = false
-            }
+            guard let self = self, self.isEnabled else { return }
+            // 生成モデルが指示を越えても、一度の応答では最初の一文だけ話す。
+            guard spokenText == nil else { return }
+            let shortSentence = YUiReplyLimiter.firstSentence(sentence)
+            guard !shortSentence.isEmpty else { return }
+            if YUiSpamFilter.isTooSimilarToPast(shortSentence, history: self.memoryManager.myResponseHistory) { return }
+            spokenText = shortSentence
             let score = primaryUser.map { self.getLikability(for: $0) } ?? 50
-            self.onResponse?(sentence, primaryUser, score)
+            self.onResponse?(shortSentence, primaryUser, score)
         }, onComplete: { [weak self] fullText in
             guard let self = self else { return }
-            guard let fullText = fullText, !fullText.isEmpty else {
+            self.responseInFlight = false
+            guard self.isEnabled else { return }
+            guard fullText != nil else {
                 self.onLog?("⚠️ YUi: API呼び出しに失敗しました")
                 return
             }
+            guard let fullText = spokenText else { return }
             self.memoryManager.conversationMemory.append((timestamp: Date(), text: "YUi: \(fullText)"))
             self.memoryManager.myResponseHistory.append(fullText)
             if self.memoryManager.myResponseHistory.count > self.memoryManager.maxResponseHistory {

@@ -125,6 +125,7 @@ class YUiAPIClient {
             "model": modelName,
             "messages": messages,
             "temperature": 0.8,
+            "max_tokens": 100,
             "stream": true
         ]
 

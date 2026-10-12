@@ -8,7 +8,7 @@ echo "🔨 Building (debug)..."
 swift build 2>&1
 
 echo "📦 Updating .app..."
-cp "$(swift build --show-bin-path)/$APP_NAME" "$APP_DIR/Contents/MacOS/$APP_NAME"
+cp "$(swift build --show-bin-path)/GravityReaderMain" "$APP_DIR/Contents/MacOS/$APP_NAME"
 codesign --force --sign - "$APP_DIR"
 
 echo "✅ Done! アプリを再起動してください"

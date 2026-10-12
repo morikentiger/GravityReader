@@ -15,6 +15,9 @@ struct VoicevoxSpeaker {
 class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
     private var audioPlayer: AVAudioPlayer?
+    private var nextSpeechWork: DispatchWorkItem?
+    private var nextSpeechDate = Date.distantPast
+    private var speechBurstStarted: Date?
     private var queue: [(text: String, voice: VoiceMode)] = []
     private(set) var isSpeaking = false {
         didSet {
@@ -167,6 +170,10 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     func stop() {
+        nextSpeechWork?.cancel()
+        nextSpeechWork = nil
+        nextSpeechDate = .distantPast
+        speechBurstStarted = nil
         synthesizer.stopSpeaking(at: .immediate)
         audioPlayer?.stop()
         audioPlayer = nil
@@ -297,6 +304,15 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     private func speakNext() {
         guard !isSpeaking, !queue.isEmpty else { return }
+        let wait = nextSpeechDate.timeIntervalSinceNow
+        if wait > 0 {
+            nextSpeechWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.speakNext() }
+            nextSpeechWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
+            return
+        }
+        if speechBurstStarted == nil { speechBurstStarted = Date() }
         let item = queue.removeFirst()
         isSpeaking = true
         onSpeakingStateChanged?(true)
@@ -371,6 +387,12 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     private func finishCurrentAndNext() {
+        let needsRest = speechBurstStarted.map { Date().timeIntervalSince($0) >= 20 } ?? false
+        nextSpeechDate = Date().addingTimeInterval(needsRest ? 5 : 1.2)
+        if needsRest {
+            speechBurstStarted = nil
+            onLog?("⏸ 読み上げが続いたため5秒休憩")
+        }
         isSpeaking = false
         if queue.isEmpty { onSpeakingStateChanged?(false) }
         speakNext()

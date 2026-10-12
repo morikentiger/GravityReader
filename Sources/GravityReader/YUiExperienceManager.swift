@@ -55,7 +55,7 @@ class YUiExperienceManager {
         experienceCache.append(newExp)
         saveExperiences()
         NSLog("[YUi] 新しい経験を追加: \(exp.event)")
-        onLog?("🌱 YUi経験+1（計\(experienceCache.count)件）: \(exp.event.prefix(30))…")
+        onLog?("🌱 YUi経験+1（計\(experienceCache.count)件）: \(exp.event)\n感情: \(exp.emotion)\n学び: \(exp.learning)")
     }
 
     /// クエリに関連する経験を検索する（日本語bigramマッチ）

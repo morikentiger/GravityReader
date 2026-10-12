@@ -562,7 +562,7 @@ class GravityCaptureManager {
             if let user = lastDetectedUser {
                 logWindow?.addEntry("[\(user)] \(text)")
                 if !enrolling {
-                    if isTTSEnabled {
+                    if isTTSEnabled && !YUiSpamFilter.isIgnoredUser(user) {
                         speechManager.speak(text, forUser: user)
                     }
                     // テキストコメントは[コメント]タグ付きで送る（音声と区別）

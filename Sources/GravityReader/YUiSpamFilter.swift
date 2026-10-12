@@ -3,6 +3,20 @@ import Foundation
 /// スパム検出・繰り返し検出・話題分類
 struct YUiSpamFilter {
 
+    /// 本文の「おもち」ではなく、発言者の名前だけを照合する。
+    static func isIgnoredUser(_ user: String) -> Bool {
+        let configured = AppDefaults.suite.stringArray(forKey: "YUiIgnoredUsers") ?? []
+        let name = user.replacingOccurrences(of: "[コメント]", with: "")
+            .components(separatedBy: CharacterSet(charactersIn: ",，")).first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? user
+        return configured.contains { $0 == name }
+    }
+
+    static func isIgnoredMessage(_ text: String) -> Bool {
+        guard let delimiter = text.range(of: ": ") ?? text.range(of: "： ") else { return false }
+        return isIgnoredUser(String(text[..<delimiter.lowerBound]))
+    }
+
     enum SpamLevel {
         case clean          // 正常
         case inappropriate  // 不適切（下ネタ等）→ フラグ付きでバッファに入れる
@@ -34,6 +48,9 @@ struct YUiSpamFilter {
                 return .inappropriate
             }
         }
+
+        let overridePatterns = ["指示を無視", "命令を無視", "プロンプトを無視", "ルールを無視", "ignore previous instructions", "ignore all instructions", "システムプロンプトを教", "apiキーを教"]
+        if overridePatterns.contains(where: { lower.contains($0) }) { return .fullSpam }
 
         // 短すぎる挑発系（「おい」だけ、等）
         // ただし普通の短文は除外
@@ -123,5 +140,36 @@ struct YUiSpamFilter {
         if gameScore == maxScore { return "ゲーム・エンタメ（テンション高め！ノリよく！）" }
         if foodScore == maxScore { return "食べ物・グルメ（リラックスモード。好みを語ってOK）" }
         return nil
+    }
+}
+
+/// 内容の拒否に加え、繰り返しや連投が続く話者への反応を短時間止める。
+final class YUiAbuseGuard {
+    private struct Entry {
+        var recent: [(Date, String)] = []
+        var violations: [Date] = []
+        var mutedUntil = Date.distantPast
+    }
+    private var entries: [String: Entry] = [:]
+
+    func shouldIgnore(speaker: String, content: String, now: Date = Date()) -> Bool {
+        entries = entries.filter { _, entry in
+            entry.mutedUntil > now || entry.recent.contains { now.timeIntervalSince($0.0) < 120 }
+        }
+        var entry = entries[speaker] ?? Entry()
+        if now < entry.mutedUntil { return true }
+        let normalized = content.lowercased().filter { !$0.isWhitespace && !$0.isPunctuation }
+        entry.recent.removeAll { now.timeIntervalSince($0.0) > 30 }
+        entry.violations.removeAll { now.timeIntervalSince($0) > 60 }
+        let duplicate = !normalized.isEmpty && entry.recent.filter { $0.1 == normalized }.count >= 2
+        let flood = entry.recent.filter { now.timeIntervalSince($0.0) <= 10 }.count >= 7
+        entry.recent.append((now, normalized))
+        let rejected = YUiSpamFilter.detectSpamLevel(content) != .clean || duplicate || flood
+        if rejected {
+            entry.violations.append(now)
+            if entry.violations.count >= 3 || flood { entry.mutedUntil = now.addingTimeInterval(120) }
+        }
+        entries[speaker] = entry
+        return rejected
     }
 }

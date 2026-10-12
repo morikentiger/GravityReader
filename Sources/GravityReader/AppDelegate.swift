@@ -70,6 +70,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // TTS再生状態をRoomTranscriptionに伝える（自分の声を拾わない）
         captureManager?.speechManager.onSpeakingChanged = { [weak self] isSpeaking in
             self?.roomTranscription?.isTTSPlaying = isSpeaking
+            if !isSpeaking { self?.yuiManager?.playbackDidFinish() }
         }
 
         captureManager?.yuiManager = yuiManager
