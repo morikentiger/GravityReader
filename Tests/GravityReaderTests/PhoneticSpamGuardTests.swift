@@ -76,6 +76,24 @@ final class PhoneticSpamGuardTests: XCTestCase {
         }
     }
 
+    func testSuppressionStatisticsCountActualDropsOnly() {
+        for mode in [1, 2] {
+            let gate = JevCommentGate { _, _, _, done in done(.spam) }
+            gate.mode = { mode }
+            var suppressed = 0
+            var accepted = 0
+            gate.onSuppressed = { _ in suppressed += 1 }
+            gate.submit("普通の短い例") { accepted += 1 }
+            XCTAssertEqual(suppressed, mode == 2 ? 1 : 0)
+            XCTAssertEqual(accepted, mode == 2 ? 0 : 1)
+        }
+        let gate = JevCommentGate { _, _, _, _ in XCTFail("local repetition must stop first") }
+        var suppressed = 0
+        gate.onSuppressed = { _ in suppressed += 1 }
+        gate.submit("あいうえおあいうえおあいうえお") { XCTFail("must be suppressed") }
+        XCTAssertEqual(suppressed, 1)
+    }
+
     func testResetIgnoresLateNormalization() {
         var finish: ((String) -> Void)?
         let gate = JevCommentGate { _, _, _, _ in XCTFail("must not evaluate after reset") }

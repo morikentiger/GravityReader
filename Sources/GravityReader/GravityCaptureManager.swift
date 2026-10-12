@@ -1,6 +1,7 @@
 import AppKit
 
 class GravityCaptureManager {
+    var onCommentSuppressed: ((String) -> Void)?
     private let jevGate = JevCommentGate()
     private let commentReadoutGuard = CommentReadoutGuard()
     private var statusBar: StatusBarController?
@@ -408,6 +409,7 @@ class GravityCaptureManager {
     init(statusBar: StatusBarController) {
         self.statusBar = statusBar
         jevGate.normalize = { [weak self] text, done in self?.speechManager.prepareReadout(text, completion: done) }
+        jevGate.onSuppressed = { [weak self] reason in self?.onCommentSuppressed?(reason) }
         jevGate.onLog = { [weak self] message in self?.logWindow?.addEntry(message) }
     }
 
@@ -552,6 +554,7 @@ class GravityCaptureManager {
             spokenHistory.insert(text)
 
             if let reason = commentReadoutGuard.suppressionReason(text, speaker: lastDetectedUser ?? "不明") {
+                onCommentSuppressed?(reason)
                 logWindow?.addEntry("🔇 コメント読み上げ抑制（\(reason)）: \(text)")
                 i += 1
                 continue

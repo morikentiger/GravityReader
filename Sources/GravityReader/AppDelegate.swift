@@ -2,6 +2,8 @@ import AppKit
 import AVFoundation
 
 public class AppDelegate: NSObject, NSApplicationDelegate {
+    private let conversationStatistics = ConversationStatistics()
+    private var statisticsWindow: ConversationStatisticsWindow?
     private var statusBarController: StatusBarController?
     private var captureManager: GravityCaptureManager?
     private var logWindowController: LogWindowController?
@@ -40,18 +42,33 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             self?.yuiManager?.personality = personality
         }
 
+        yuiManager?.onConversationPlanChanged = { [weak self] plan, activity in
+            self?.logWindowController?.updateConversationPlan(plan, activity: activity)
+            self?.statisticsWindow?.plan = plan
+            self?.statisticsWindow?.activity = activity
+            let settings = YUiPersonality.load()
+            self?.statusBarController?.updateFrequencyDisplay(settings)
+            self?.preferencesController?.updateFrequencyDisplay(settings)
+        }
+
+        statisticsWindow = ConversationStatisticsWindow(statistics: conversationStatistics)
+        yuiManager?.refreshConversationPlan()
+        statusBarController?.onShowStatistics = { [weak self] in self?.statisticsWindow?.show() }
+        yuiManager?.onInputAccepted = { [weak self] text, isComment in
+            self?.conversationStatistics.record(isComment ? .comment : .voice, characters: text.count)
+        }
+        yuiManager?.onReplyLatency = { [weak self] latency in self?.conversationStatistics.record(.latency, latency: latency) }
+        yuiManager?.onInputSuppressed = { [weak self] reason in self?.conversationStatistics.record(.suppressed, reason: reason) }
+        captureManager?.onCommentSuppressed = { [weak self] reason in self?.conversationStatistics.record(.suppressed, reason: reason) }
+
         yuiManager?.onResponse = { [weak self] response, targetUser, likability in
+            self?.conversationStatistics.record(.reply, characters: response.count)
             self?.logWindowController?.addEntry("🤖 YUi: \(response)", isYUi: true)
             self?.speakAsYUi(response, likability: likability)
         }
         yuiManager?.onLog = { [weak self] message in
             self?.logWindowController?.addEntry(message)
         }
-        yuiManager?.onAizuchi = { [weak self] aizuchi in
-            self?.logWindowController?.addEntry("🤖 YUi: \(aizuchi)", isYUi: true)
-            self?.captureManager?.speakText(aizuchi)
-        }
-
         // ルーム音声文字起こし（ScreenCaptureKit で GRAVITY の音声を直接キャプチャ）
         roomTranscription = RoomTranscriptionManager()
         roomTranscription?.diarizer.initializeNeuralModel()  // ECAPA-TDNN ロード開始
@@ -212,7 +229,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.logWindowController?.addEntry(msg)
                 }
                 self.preferencesController?.onFrequencyChanged = { [weak self] freq in
-                    self?.yuiManager?.frequency = freq
+                    self?.yuiManager?.setFrequencyPreset(freq)
                     self?.logWindowController?.addEntry("⏱ YUi応答頻度: \(freq.rawValue) に変更しました")
                 }
                 self.preferencesController?.onVoicevoxURLChanged = { [weak self] url in
@@ -271,7 +288,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusBarController?.onFrequencyChanged = { [weak self] freq in
-            self?.yuiManager?.frequency = freq
+            self?.yuiManager?.setFrequencyPreset(freq)
             self?.logWindowController?.addEntry("⏱ YUi応答頻度: \(freq.rawValue) に変更しました")
         }
 

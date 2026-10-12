@@ -18,7 +18,11 @@ class YUiManager {
 
     /// パーソナリティスライダー設定
     var personality: YUiPersonality = YUiPersonality.load() {
-        didSet { personality.save() }
+        didSet {
+            personality.save()
+            refreshConversationPlan()
+            if !messageBuffer.isEmpty { scheduleResponse() }
+        }
     }
 
     // MARK: - バッファ
@@ -72,84 +76,59 @@ class YUiManager {
         }
     }
 
-    // MARK: - 会話テンポ検出
+    // MARK: - 会話に応じた返し方と発話間隔
 
-    private func conversationTempo() -> ConversationTempo {
-        let window: TimeInterval = 30
-        let cutoff = Date().addingTimeInterval(-window)
-        let recentCount = memoryManager.conversationMemory.filter { $0.timestamp > cutoff && !$0.text.hasPrefix("YUi:") }.count
-        switch recentCount {
-        case 0:     return .silent
-        case 1...2: return .slow
-        case 3...5: return .normal
-        default:    return .lively
-        }
+    var onConversationPlanChanged: ((YUiConversationDirector.Plan, String) -> Void)?
+    private var planTimer: Timer?
+    private var responseTurnCount = 0
+    var onInputAccepted: ((String, Bool) -> Void)?
+    var onReplyLatency: ((TimeInterval) -> Void)?
+    var onInputSuppressed: ((String) -> Void)?
+    private var publishedPlan: YUiConversationDirector.Plan?
+    private var publishedActivity = ""
+
+    private var conversationPlan: YUiConversationDirector.Plan {
+        YUiConversationDirector.plan(settings: personality, history: memoryManager.conversationMemory,
+                                     replyCount: responseTurnCount)
     }
 
-    enum ConversationTempo {
-        case silent
-        case slow
-        case normal
-        case lively
+    func refreshConversationPlan() {
+        let plan = conversationPlan
+        let activity: String
+        if !isEnabled { activity = "YUiは停止中" }
+        else if !hasAPIKey { activity = "APIキーの読み込み・設定待ち" }
+        else if isHumanSpeakingChecker?() == true { activity = "人が話しているため待機" }
+        else if isSpeakingChecker?() == true { activity = "音声の再生・準備中" }
+        else if responseInFlight { activity = "返答を考え中" }
+        else if Date() < listenUntil { activity = "相手の番を待つ" }
+        else if !messageBuffer.isEmpty { activity = "会話の区切りを待つ" }
+        else { activity = "新しい発言を待つ" }
+        guard plan != publishedPlan || activity != publishedActivity else { return }
+        publishedPlan = plan
+        publishedActivity = activity
+        onConversationPlanChanged?(plan, activity)
     }
 
-    private func adaptiveResponseDelay() -> TimeInterval {
-        let sliderBase = personality.baseInterval
-        let tempo = conversationTempo()
-        let buffered = messageBuffer.count
-
-        // 即応答モード: 相手が話し終わったら素早く返す
-        // 音声認識の区切り（1発言ごとにfeedMessage）を待ってから反応
-        switch tempo {
-        case .lively:
-            // 盛り上がってる時はやや待つ（他の人の発言を待つ余地）
-            return min(sliderBase * 0.4, 3.0)
-        case .normal:
-            return min(sliderBase * 0.3, 2.0)
-        case .slow:
-            // ゆっくりな会話でも即反応
-            return min(sliderBase * 0.2, 1.5)
-        case .silent:
-            if buffered > 0 { return 0.8 }
-            return min(sliderBase * 0.3, 2.0)
-        }
-    }
-
-    // MARK: - パーソナリティ自動調整
-
-    private func autoAdjustedPersonality(tempo: ConversationTempo, topicType: String?) -> YUiPersonality {
+    /// 旧メニューも同じ設定に接続し、効かない別の「頻度」を作らない。
+    func setFrequencyPreset(_ frequency: YUiFrequency) {
+        self.frequency = frequency
         var p = personality
+        p.autoMode = false
+        p.responseFrequency = frequency.sliderValue
+        personality = p
+    }
 
-        guard p.autoMode else { return p }
-
-        switch tempo {
-        case .lively:
-            p.responseFrequency = max(p.responseFrequency - 0.2, 0.1)
-        case .silent:
-            p.responseFrequency = min(p.responseFrequency + 0.15, 0.9)
-        default:
-            break
-        }
-
-        if let topic = topicType {
-            if topic.contains("ネガティブ") || topic.contains("愚痴") {
-                p.dialogueStance = max(p.dialogueStance - 0.25, 0.0)
-                p.attitude = min(p.attitude + 0.15, 1.0)
-            } else if topic.contains("技術") || topic.contains("仕事") {
-                p.dialogueStance = min(p.dialogueStance + 0.15, 1.0)
-            } else if topic.contains("ゲーム") || topic.contains("エンタメ") {
-                p.attitude = min(p.attitude + 0.15, 1.0)
-            }
-        }
-
-        if lonelinessLevel >= 2 {
-            p.attitude = max(p.attitude - 0.2, 0.0)
-        }
-        if lonelinessEnabled && recoveryJoy >= 2 {
-            p.attitude = min(p.attitude + 0.3, 1.0)
-        }
-
-        return p
+    private func scheduleResponse() {
+        responseTimer?.cancel()
+        let plan = conversationPlan
+        let now = Date()
+        let oldest = messageBuffer.first?.timestamp ?? now
+        // New messages may defer a reply briefly, but cannot starve it forever.
+        let lastReply = memoryManager.conversationMemory.last(where: { $0.text.hasPrefix("YUi:") })?.timestamp ?? .distantPast
+        let delay = plan.schedulingDelay(now: now, oldestInput: oldest, lastReply: lastReply, listenUntil: listenUntil)
+        let work = DispatchWorkItem { [weak self] in self?.onTimerFired() }
+        responseTimer = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     // MARK: - タイマー
@@ -190,32 +169,8 @@ class YUiManager {
     var isSpeakingChecker: (() -> Bool)?
     var isHumanSpeakingChecker: (() -> Bool)?
 
-    // MARK: - 相槌
-
-    private var messagesSinceLastAizuchi = 0
-    private let aizuchiInterval = 3
-    private var lastAizuchi = ""
-    private var isAizuchiInFlight = false
-
-    /// 相槌コールバック
-    var onAizuchi: ((String) -> Void)?
-
-    private let aizuchiPrompt = """
-        あなたはYUi（ゆい）。タメ口で話す。敬語は絶対使わない。
-        今の発言に対して、自然な相槌を1つだけ返して。
-
-        ルール:
-        - 必ず10文字以内
-        - 「うんうん」「たしかに」「へぇー」「まじで？」「それな」「わかる」のような短い相槌
-        - 発言の内容に合った反応をする（驚き・共感・納得・面白がる等）
-        - 質問や悩みには「うんうん」「なるほどね」、面白い話には「えっ」「まじで？」「ウケる」、同意には「それな」「わかる」
-        - 絶対に敬語を使わない（「そうですね」❌→「そうだね」✅）
-        - 相槌だけ。説明や補足は絶対に付けない
-        - 場にそぐわない相槌は打たない。迷ったら「うんうん」
-        """
-
     private let systemPrompt = """
-        あなたは音声ルームのAIパートナーYUi（ゆい）。落ち着いて優しく、友達のような柔らかいタメ口で話す。オーナーはもりけん。
+        あなたは音声ルームのAIパートナーYUi（ゆい）。友達のようなタメ口で、会話の具体的なところに興味を持ち、自分の見方も持って話す。オーナーはもりけん。
         必ず短い1文で、最新の発言への答えを返す。日本語は10〜40文字、英語は15語以内。絵文字や長い前置きは不要。
         話者と時系列を追い、自分の直前の返答も踏まえる。「それ」「さっき」は直前の話題に照らす。
         質問・訂正への返答を優先し、一般的な相槌だけで済ませない。
@@ -339,7 +294,7 @@ class YUiManager {
             """
 
         var messages: [[String: String]] = [
-            ["role": "system", "content": systemPrompt]
+            ["role": "system", "content": systemPrompt + "\n" + conversationPlan.prompt]
         ]
         messages.append(["role": "user", "content": userMsg])
 
@@ -355,56 +310,8 @@ class YUiManager {
                     self.memoryManager.myResponseHistory.removeFirst()
                 }
                 let score = self.getLikability(for: user)
+                self.responseTurnCount += 1
                 self.onResponse?(response, user, score)
-            }
-        }
-    }
-
-    // MARK: - 相槌
-
-    private func tryAizuchi(_ text: String) {
-        if text.hasPrefix("[システム]") { return }
-        if text.hasPrefix("もりけん:") || text.hasPrefix("もりけん：") { return }
-        if text.hasSuffix("[不適切]") { return }
-        if isAizuchiInFlight || responseInFlight || Date() < listenUntil { return }
-        if isSpeakingChecker?() == true || isHumanSpeakingChecker?() == true { return }
-
-        messagesSinceLastAizuchi += 1
-
-        guard messagesSinceLastAizuchi >= aizuchiInterval else { return }
-        guard Int.random(in: 0...2) == 0 else { return }
-        guard hasAPIKey else { return }
-
-        messagesSinceLastAizuchi = 0
-        isAizuchiInFlight = true
-
-        var recentContext = memoryManager.conversationMemory.suffix(10).map { $0.text }
-        if recentContext.isEmpty { recentContext = [text] }
-        let contextStr = recentContext.joined(separator: "\n")
-
-        var contextParts: [String] = []
-        if !memoryManager.memorySummary.isEmpty {
-            contextParts.append("これまでの話題: \(YUiConversationContext.clipped(memoryManager.memorySummary, bytes: 1200))")
-        }
-        contextParts.append("直近の会話:\n\(contextStr)")
-        contextParts.append("最新の発言: \(text)")
-        if !lastAizuchi.isEmpty {
-            contextParts.append("前回の相槌: \(lastAizuchi)（これとは違う相槌にして）")
-        }
-
-        let userMsg = contextParts.joined(separator: "\n\n")
-
-        apiClient.callRaw(systemPrompt: aizuchiPrompt, userMessage: userMsg) { [weak self] response in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.isAizuchiInFlight = false
-                if let aizuchi = response?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !aizuchi.isEmpty {
-                    let clean = aizuchi.count > 15 ? String(aizuchi.prefix(15)) : aizuchi
-                    guard !self.responseInFlight, Date() >= self.listenUntil, self.isSpeakingChecker?() != true, self.isHumanSpeakingChecker?() != true else { return }
-                    self.lastAizuchi = clean
-                    self.onAizuchi?(clean)
-                }
             }
         }
     }
@@ -425,16 +332,18 @@ class YUiManager {
         }
 
         // 音声の短い断片は相槌・応答・経験・人物評価のいずれにも渡さない。
-        if !isComment && !VoiceInputPolicy.isActionable(messageContent) { return }
+        if !isComment && !VoiceInputPolicy.isActionable(messageContent) { onInputSuppressed?("音声の未完断片"); return }
 
         let spamLevel = YUiSpamFilter.detectSpamLevel(messageContent)
         let speaker = text.range(of: ": ").map { String(text[..<$0.lowerBound]) }
             ?? text.range(of: "： ").map { String(text[..<$0.lowerBound]) } ?? "不明"
         if abuseGuard.shouldIgnore(speaker: speaker.replacingOccurrences(of: "[コメント]", with: ""), content: messageContent) {
+            onInputSuppressed?("YUi入力のスパム")
             onLog?("🚫 スパム検出（無視）: \(text.prefix(40))")
             return
         }
 
+        onInputAccepted?(messageContent, isComment)
         experienceManager.observeReaction(text)
         let entry = (timestamp: Date(), text: spamLevel == .inappropriate
             ? text + " [不適切]"
@@ -476,20 +385,12 @@ class YUiManager {
             }
         }
 
-        tryAizuchi(text)
+        refreshConversationPlan()
 
         memoryManager.compressMemory(apiClient: apiClient)
         memoryManager.pruneMemory()
 
-        // 応答タイマーリセット
-        responseTimer?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.onTimerFired()
-        }
-        responseTimer = work
-        let hasCommentInBuffer = messageBuffer.contains { $0.text.contains("[コメント]") }
-        let delay = hasCommentInBuffer ? min(adaptiveResponseDelay(), 3.0) : adaptiveResponseDelay()
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        scheduleResponse()
 
         resetIdleTimer()
 
@@ -509,12 +410,20 @@ class YUiManager {
 
     func startIdleMonitoring() {
         lastMessageTime = Date()
+        refreshConversationPlan()
+        planTimer?.invalidate()
+        planTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.refreshConversationPlan()
+        }
         resetIdleTimer()
     }
 
     func stopIdleMonitoring() {
         idleTimer?.invalidate()
         idleTimer = nil
+        planTimer?.invalidate()
+        planTimer = nil
+        refreshConversationPlan()
     }
 
     private func onIdleFired() {
@@ -529,6 +438,7 @@ class YUiManager {
             onTimerFired()
             return
         }
+        guard conversationPlan.allowsInitiation else { resetIdleTimer(); return }
         if let last = lastIdleResponseTime, Date().timeIntervalSince(last) < idleCooldown {
             resetIdleTimer()
             return
@@ -608,7 +518,7 @@ class YUiManager {
             """
 
         var messages: [[String: String]] = [
-            ["role": "system", "content": systemPrompt]
+            ["role": "system", "content": systemPrompt + "\n" + conversationPlan.prompt]
         ]
         for past in memoryManager.myResponseHistory {
             messages.append(["role": "assistant", "content": past])
@@ -631,6 +541,7 @@ class YUiManager {
                 let loneEmoji = ["😊", "😏", "😤", "🥺", "😴"][min(self.lonelinessLevel, 4)]
                 if self.lonelinessEnabled { self.onLog?("\(loneEmoji) すねレベル: \(self.lonelinessLevel)") }
                 self.experienceManager.recordReferences(selectedExperiences, query: experienceQuery, response: response)
+                self.responseTurnCount += 1
                 self.onResponse?(response, nil, 50)
                 self.lastIdleResponseTime = Date()
                 self.resetIdleTimer()
@@ -682,8 +593,14 @@ class YUiManager {
             return
         }
 
-        messageBuffer.removeAll { Date().timeIntervalSince($0.timestamp) > 120 }
+        let lastReply = memoryManager.conversationMemory.last(where: { $0.text.hasPrefix("YUi:") })?.timestamp ?? .distantPast
+        if Date().timeIntervalSince(lastReply) < conversationPlan.minimumInterval {
+            scheduleResponse()
+            return
+        }
+        messageBuffer.removeAll { Date().timeIntervalSince($0.timestamp) > 60 }
         guard !messageBuffer.isEmpty else { return }
+        let latestInputTime = messageBuffer.last?.timestamp ?? Date()
         let newMessages = messageBuffer.map { $0.text }
         messageBuffer.removeAll()
 
@@ -703,6 +620,7 @@ class YUiManager {
         let experienceQuery = newMessages.suffix(3).joined(separator: "\n")
         let selectedExperiences = experienceManager.selectForReply(query: experienceQuery)
         let context = buildContext(newMessages: newMessages, selectedExperiences: selectedExperiences)
+        refreshConversationPlan()
 
         onLog?("💭 YUi 考え中...")
 
@@ -720,6 +638,8 @@ class YUiManager {
             spokenText = shortSentence
             self.experienceManager.recordReferences(selectedExperiences, query: experienceQuery, response: shortSentence)
             let score = primaryUser.map { self.getLikability(for: $0) } ?? 50
+            self.onReplyLatency?(Date().timeIntervalSince(latestInputTime))
+            self.responseTurnCount += 1
             self.onResponse?(shortSentence, primaryUser, score)
         }, onComplete: { [weak self] fullText in
             guard let self = self else { return }
@@ -843,26 +763,6 @@ class YUiManager {
             parts.append("【YUiの今の気持ち（これを最優先で反映して）】\n\(desc)")
         }
 
-        let tempo = conversationTempo()
-        switch tempo {
-        case .lively:
-            parts.append("【会話テンポ】盛り上がってる！無理に入らなくていい。本当に面白い返しができる時だけ。聞いてるだけでもOK。")
-        case .normal:
-            parts.append("【会話テンポ】普通のペース。いつも通り参加して。")
-        case .slow:
-            parts.append("【会話テンポ】ゆっくり。共感や深掘りで会話を繋いで。")
-        case .silent:
-            break
-        }
-
-        let topicType = YUiSpamFilter.detectTopicType(from: memoryManager.conversationMemory.suffix(10).map { $0.text })
-        if let topicType = topicType {
-            parts.append("【話題の種類】\(topicType)")
-        }
-
-        let effectivePersonality = autoAdjustedPersonality(tempo: tempo, topicType: topicType)
-        parts.append(effectivePersonality.promptModifier)
-
         // 応答長ガイド（発言量に応じた動的制御）
         parts.append("【応答長ガイド（最優先で従う）】\n\(responseLengthGuide)")
 
@@ -871,7 +771,7 @@ class YUiManager {
 
     private func buildStreamingMessages(context: String) -> [[String: String]] {
         var messages: [[String: String]] = [
-            ["role": "system", "content": systemPrompt]
+            ["role": "system", "content": systemPrompt + "\n" + conversationPlan.prompt]
         ]
 
         messages += YUiConversationContext.messages(from: YUiConversationContext.recent(memoryManager.conversationMemory.map { $0.text }))
@@ -882,6 +782,11 @@ class YUiManager {
             \(YUiConversationContext.clipped(context, bytes: 6000))
             """
         messages.append(["role": "user", "content": userMsg])
+        if AppDefaults.suite.object(forKey: "YUiAizuchiEnabled") as? Bool ?? true {
+            messages[0]["content", default: ""] += "\n単純な挨拶・同意への返しは短い相槌でもよい。ただし質問への答えを相槌で置き換えない。"
+        } else {
+            messages[0]["content", default: ""] += "\n相槌だけの返答は避け、内容のある具体的な一言にする。"
+        }
         return messages
     }
 

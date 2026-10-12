@@ -21,6 +21,7 @@ class StatusBarController {
     var onToggle: ((Bool) -> Void)?
     var onTest: (() -> Void)?
     var onShowLog: (() -> Void)?
+    var onShowStatistics: (() -> Void)?
     var onShowExperiences: (() -> Void)?
     var onDumpAXTree: (() -> Void)?
     var onSetAPIKey: ((String) -> Void)?
@@ -140,9 +141,9 @@ class StatusBarController {
 
         // YUi応答頻度サブメニュー
         frequencySubmenu = NSMenu()
-        let currentFreq = YUiFrequency(rawValue: AppDefaults.suite.string(forKey: "YUiFrequency") ?? "") ?? .high
+        let currentFreq = YUiPersonality.load().manualFrequencyPreset
         for freq in YUiFrequency.allCases {
-            let item = NSMenuItem(title: freq.rawValue, action: #selector(selectFrequency(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: freq.displayTitle, action: #selector(selectFrequency(_:)), keyEquivalent: "")
             item.target = self
             item.state = freq == currentFreq ? .on : .off
             item.representedObject = freq
@@ -214,7 +215,7 @@ class StatusBarController {
         voiceMenuItem.title = "読み上げ音声"
         userVoiceMenuItem.title = "人ごとの音声"
         enrollMenuItem.title = "声紋を登録"
-        freqMenuItem.title = "応答頻度"
+        freqMenuItem.title = "参加頻度を手動にする"
         modelItem.title = "節約モデルを使う"
         apiKeyItem.title = "APIキーを設定…"
         testItem.title = "音声をテスト"
@@ -235,6 +236,10 @@ class StatusBarController {
          .separator(), showLogItem, experiencesItem, catchUpItem, .separator(),
          voiceParent, yuiParent, prefsItem, advancedParent, .separator(), quitItem].forEach { menu.addItem($0) }
         statusItem.menu = menu
+
+        let statsItem = NSMenuItem(title: "会話の状態と統計…", action: #selector(showStatistics), keyEquivalent: "")
+        statsItem.target = self
+        menu.insertItem(statsItem, at: menu.index(of: experiencesItem) + 1)
 
         // 通常のアプリメニューからも画面を開けるようにする。
         let mainMenu = NSMenu()
@@ -260,9 +265,16 @@ class StatusBarController {
         let experiences = NSMenuItem(title: "経験ノート", action: #selector(showExperiences), keyEquivalent: "e")
         experiences.target = self
         displayMenu.addItem(experiences)
+        let stats = NSMenuItem(title: "会話の状態と統計", action: #selector(showStatistics), keyEquivalent: "i")
+        stats.target = self
+        displayMenu.addItem(stats)
         displayItem.submenu = displayMenu
         mainMenu.addItem(displayItem)
         NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func showStatistics() {
+        DispatchQueue.main.async { [weak self] in self?.onShowStatistics?() }
     }
 
     @objc private func showExperiences() {
@@ -446,6 +458,13 @@ class StatusBarController {
     }
 
     // MARK: - Frequency selection
+
+    func updateFrequencyDisplay(_ personality: YUiPersonality) {
+        for item in frequencySubmenu.items {
+            guard let frequency = item.representedObject as? YUiFrequency else { continue }
+            item.state = personality.manualFrequencyPreset == frequency ? .on : .off
+        }
+    }
 
     @objc private func selectFrequency(_ sender: NSMenuItem) {
         guard let freq = sender.representedObject as? YUiFrequency else { return }

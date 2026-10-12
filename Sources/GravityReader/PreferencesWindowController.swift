@@ -178,17 +178,13 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 340))
 
         // --- 応答頻度 ---
-        let freqLabel = makeLabel("応答頻度:", frame: NSRect(x: 20, y: 280, width: 100, height: 20))
+        let freqLabel = makeLabel("手動の参加頻度:", frame: NSRect(x: 20, y: 280, width: 100, height: 20))
         view.addSubview(freqLabel)
 
         frequencySegmented = NSSegmentedControl(labels: ["よく話す", "ふつう", "控えめ"], trackingMode: .selectOne, target: self, action: #selector(frequencyChanged(_:)))
         frequencySegmented.frame = NSRect(x: 130, y: 278, width: 320, height: 24)
-        let savedFreq = YUiFrequency(rawValue: AppDefaults.suite.string(forKey: PrefKey.frequency) ?? "") ?? .high
-        switch savedFreq {
-        case .high:   frequencySegmented.selectedSegment = 0
-        case .medium: frequencySegmented.selectedSegment = 1
-        case .low:    frequencySegmented.selectedSegment = 2
-        }
+        updateFrequencyDisplay(YUiPersonality.load())
+        frequencySegmented.toolTip = "選ぶと手動に切り替わります。会話ログ下部でも調整できます。"
         view.addSubview(frequencySegmented)
 
         // --- 孤独感システム ---
@@ -218,7 +214,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         aizuchiToggle.action = #selector(aizuchiToggled(_:))
         view.addSubview(aizuchiToggle)
 
-        let aizuchiDesc = makeLabel("会話中に短い相槌を自動で打つ", frame: NSRect(x: 210, y: 185, width: 260, height: 18))
+        let aizuchiDesc = makeLabel("通常の返答で短い相槌も許可（二重発話なし）", frame: NSRect(x: 210, y: 185, width: 260, height: 18))
         aizuchiDesc.font = .systemFont(ofSize: 11)
         aizuchiDesc.textColor = .secondaryLabelColor
         view.addSubview(aizuchiDesc)
@@ -730,7 +726,18 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
 
     // MARK: - Show
 
+    func updateFrequencyDisplay(_ personality: YUiPersonality) {
+        guard frequencySegmented != nil else { return }
+        switch personality.manualFrequencyPreset {
+        case .high: frequencySegmented.selectedSegment = 0
+        case .medium: frequencySegmented.selectedSegment = 1
+        case .low: frequencySegmented.selectedSegment = 2
+        case nil: frequencySegmented.selectedSegment = -1
+        }
+    }
+
     func showWindow() {
+        updateFrequencyDisplay(YUiPersonality.load())
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

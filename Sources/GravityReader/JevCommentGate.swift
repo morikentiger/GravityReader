@@ -7,6 +7,7 @@ final class JevCommentGate {
     typealias Evaluate = (String, String, [String], @escaping (Verdict) -> Void) -> Void
     var normalize: (String, @escaping (String) -> Void) -> Void = { text, done in done(text) }
     var mode: () -> Int = { AppDefaults.suite.integer(forKey: "GR_JevMode") } // 0 off, 1 observe, 2 suppress
+    var onSuppressed: ((String) -> Void)?
     var onLog: ((String) -> Void)?
     private var pending: [(String, (String) -> Void, Date)] = []
     private var context: [String] = []
@@ -42,6 +43,7 @@ final class JevCommentGate {
 
     func submitPrepared(_ text: String, accepted: @escaping (String) -> Void) {
         guard pending.count < 8 else {
+            onSuppressed?("処理待ち上限")
             notice("🔇 コメント処理の混雑により追加の読み上げを抑制")
             return
         }
@@ -66,6 +68,7 @@ final class JevCommentGate {
         guard active == nil, !pending.isEmpty else { return }
         let (text, accepted, enqueued) = pending.removeFirst()
         guard Date().timeIntervalSince(enqueued) < 20 else {
+            onSuppressed?("処理待ち期限切れ")
             notice("🔇 古くなった処理待ちコメントの読み上げを抑制")
             pump()
             return
@@ -75,6 +78,7 @@ final class JevCommentGate {
         let deadline = DispatchWorkItem { [weak self] in
             guard let self = self, self.active == preparationID else { return }
             self.active = nil
+            self.onSuppressed?("読み方確認の時間切れ")
             self.notice("🔇 読み方の確認がタイムアウトしたためコメントを抑制")
             self.pump()
         }
@@ -85,6 +89,7 @@ final class JevCommentGate {
             self.timeout?.cancel()
             self.active = nil
             if let reason = PhoneticSpamGuard.suppressionReason(original: text, reading: reading) {
+                self.onSuppressed?("同じ音の反復")
                 self.onLog?("🔇 音の反復を抑制（\(reason)）: \(String(text.prefix(80)))")
                 self.pump()
                 return
@@ -116,7 +121,7 @@ final class JevCommentGate {
             case .spam:
                 self.onLog?(suppress ? "🔇 Jev: スパム判定により読み上げ・YUiへの入力を抑制" : "🔎 Jev: スパム候補（観察モード）")
                 self.onLog?("🔎 判定対象: \(String(text.prefix(80)))")
-                if !suppress { accepted() }
+                if suppress { self.onSuppressed?("Jevのスパム判定") } else { accepted() }
             case .allow:
                 accepted()
                 self.context = Array((self.context + [String(text.prefix(200))]).suffix(3))

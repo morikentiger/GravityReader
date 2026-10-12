@@ -36,18 +36,13 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
     private var bookmarkToggleButton: NSButton!
     private var searchBarContainer: NSView!
 
-    // --- Statistics panel ---
-    private var statsContainer: NSView!
-    private var statsLabel: NSTextField!
-    private var statsToggleButton: NSButton!
-    private var statsVisible = false
-
     // --- Personality sliders ---
     private var sliderContainer: NSView!
     private var frequencySlider: NSSlider!
     private var stanceSlider: NSSlider!
     private var attitudeSlider: NSSlider!
-    private var autoModeToggle: NSButton!
+    private var autoModeToggle: NSSegmentedControl!
+    private var conversationStatusLabel: NSTextField!
     private var frequencyValueLabel: NSTextField!
     private var stanceValueLabel: NSTextField!
     private var attitudeValueLabel: NSTextField!
@@ -65,10 +60,6 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
     // --- Bookmarks ---
     private var bookmarkedIDs: Set<String> = []   // stored as UUID strings
     private let bookmarksDefaultsKey = "GravityReaderLogBookmarks"
-
-    // --- Statistics ---
-    private var speakerCounts: [String: Int] = [:]
-    private var sessionStart = Date()
 
     convenience init() {
         let window = NSWindow(
@@ -161,33 +152,6 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
             searchField.trailingAnchor.constraint(equalTo: filterPopup.leadingAnchor, constant: -4),
         ])
 
-        // ── Stats container (bottom, collapsible) ──
-        statsContainer = NSView()
-        statsContainer.translatesAutoresizingMaskIntoConstraints = false
-        statsContainer.wantsLayer = true
-        statsContainer.layer?.backgroundColor = NSColor(white: 0.15, alpha: 1).cgColor
-        statsContainer.isHidden = true
-        contentView.addSubview(statsContainer)
-
-        statsLabel = NSTextField(labelWithString: "")
-        statsLabel.translatesAutoresizingMaskIntoConstraints = false
-        statsLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        statsLabel.textColor = NSColor(white: 0.75, alpha: 1)
-        statsLabel.maximumNumberOfLines = 0
-        statsLabel.lineBreakMode = .byWordWrapping
-        statsLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        statsContainer.addSubview(statsLabel)
-
-        // Stats toggle button (always visible at bottom-left)
-        statsToggleButton = NSButton(title: "📊 統計", target: self, action: #selector(toggleStats))
-        statsToggleButton.translatesAutoresizingMaskIntoConstraints = false
-        statsToggleButton.bezelStyle = .recessed
-        statsToggleButton.isBordered = true
-        statsToggleButton.font = .systemFont(ofSize: 11)
-        statsToggleButton.toolTip = "統計パネル表示/非表示"
-        statsToggleButton.setButtonType(.pushOnPushOff)
-        contentView.addSubview(statsToggleButton)
-
         // ── Personality slider container (bottom) ──
         sliderContainer = NSView()
         sliderContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -216,33 +180,12 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
 
         contentView.addSubview(scrollView)
 
-        // Stats container constraints
-        let statsHeight = statsContainer.heightAnchor.constraint(equalToConstant: 80)
-        statsHeight.priority = .defaultHigh
-
         NSLayoutConstraint.activate([
             // Slider container at very bottom
             sliderContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             sliderContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             sliderContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            sliderContainer.heightAnchor.constraint(equalToConstant: 92),
-
-            // Stats toggle button above slider container
-            statsToggleButton.bottomAnchor.constraint(equalTo: sliderContainer.topAnchor, constant: -2),
-            statsToggleButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
-            statsToggleButton.heightAnchor.constraint(equalToConstant: 24),
-            statsToggleButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 60),
-
-            // Stats container above toggle button
-            statsContainer.bottomAnchor.constraint(equalTo: statsToggleButton.topAnchor),
-            statsContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            statsContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            statsHeight,
-
-            statsLabel.topAnchor.constraint(equalTo: statsContainer.topAnchor, constant: 4),
-            statsLabel.leadingAnchor.constraint(equalTo: statsContainer.leadingAnchor, constant: 8),
-            statsLabel.trailingAnchor.constraint(equalTo: statsContainer.trailingAnchor, constant: -8),
-            statsLabel.bottomAnchor.constraint(lessThanOrEqualTo: statsContainer.bottomAnchor, constant: -4),
+            sliderContainer.heightAnchor.constraint(equalToConstant: 158),
 
             // Scroll view fills space between search bar and stats
             scrollView.topAnchor.constraint(equalTo: searchBarContainer.bottomAnchor),
@@ -250,8 +193,7 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
             scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
         ])
 
-        // scrollView の下端は動的に管理（統計パネル表示/非表示で切り替え）
-        updateScrollViewBottomConstraint()
+        scrollView.bottomAnchor.constraint(equalTo: sliderContainer.topAnchor).isActive = true
 
         // Cmd+F key handling via monitor
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -266,21 +208,6 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         }
     }
 
-    private var scrollViewBottomConstraint: NSLayoutConstraint?
-
-    private func updateScrollViewBottomConstraint() {
-        guard let contentView = window?.contentView else { return }
-        scrollViewBottomConstraint?.isActive = false
-
-        if statsVisible {
-            scrollViewBottomConstraint = scrollView.bottomAnchor.constraint(equalTo: statsContainer.topAnchor)
-        } else {
-            scrollViewBottomConstraint = scrollView.bottomAnchor.constraint(equalTo: statsToggleButton.topAnchor)
-        }
-        scrollViewBottomConstraint?.isActive = true
-        contentView.layoutSubtreeIfNeeded()
-    }
-
     // MARK: - Personality Slider Panel
 
     private func buildSliderPanel() {
@@ -292,9 +219,9 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         // 3つのスライダーを横に並べる
         // 各スライダー: ラベル(上) + スライダー(中) + 値ラベル(下)
         let sliderData: [(String, String, Float, Selector)] = [
-            ("応答頻度", "静か ← → よく喋る", currentPersonality.responseFrequency, #selector(frequencySliderChanged(_:))),
-            ("スタンス", "共感 ← → 挑戦", currentPersonality.dialogueStance, #selector(stanceSliderChanged(_:))),
-            ("態度", "ツン ← → デレ", currentPersonality.attitude, #selector(attitudeSliderChanged(_:))),
+            ("参加頻度", "聞き役 ← → よく参加", currentPersonality.responseFrequency, #selector(frequencySliderChanged(_:))),
+            ("視点", "受け止める ← → 意見を出す", currentPersonality.dialogueStance, #selector(stanceSliderChanged(_:))),
+            ("遊び心", "落ち着き ← → 軽妙", currentPersonality.attitude, #selector(attitudeSliderChanged(_:))),
         ]
 
         var sliders: [NSSlider] = []
@@ -321,6 +248,8 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
             slider.translatesAutoresizingMaskIntoConstraints = false
             slider.controlSize = .small
             slider.isContinuous = true
+            slider.setAccessibilityLabel(title)
+            slider.toolTip = title == "参加頻度" ? "自発的な応答の間隔を8〜60秒で調整。質問・呼びかけには優先して返答します。" : hint
             col.addSubview(slider)
             sliders.append(slider)
 
@@ -364,43 +293,57 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         stanceValueLabel = valueLabels[1]
         attitudeValueLabel = valueLabels[2]
 
-        // Auto mode toggle (右端に小さく)
-        autoModeToggle = NSButton(checkboxWithTitle: "自動", target: self, action: #selector(autoModeToggled(_:)))
+        let heading = NSTextField(labelWithString: "YUiの会話")
+        heading.font = .systemFont(ofSize: 12, weight: .semibold)
+        heading.textColor = .labelColor
+        heading.translatesAutoresizingMaskIntoConstraints = false
+        sliderContainer.addSubview(heading)
+
+        autoModeToggle = NSSegmentedControl(labels: ["会話に合わせる", "手動"], trackingMode: .selectOne,
+                                            target: self, action: #selector(autoModeToggled(_:)))
         autoModeToggle.translatesAutoresizingMaskIntoConstraints = false
-        autoModeToggle.font = NSFont.systemFont(ofSize: 11)
-        autoModeToggle.contentTintColor = valueColor
-        autoModeToggle.state = currentPersonality.autoMode ? .on : .off
+        autoModeToggle.selectedSegment = currentPersonality.autoMode ? 0 : 1
+        autoModeToggle.toolTip = "自動では現在使っている値を表示。手動に戻すと前の手動設定を復元します。"
         sliderContainer.addSubview(autoModeToggle)
 
-        // 3カラムの横並びレイアウト
+        conversationStatusLabel = NSTextField(wrappingLabelWithString: "新しい発言を待つ")
+        conversationStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        conversationStatusLabel.font = .systemFont(ofSize: 11)
+        conversationStatusLabel.textColor = NSColor(white: 0.85, alpha: 1)
+        conversationStatusLabel.maximumNumberOfLines = 2
+        sliderContainer.addSubview(conversationStatusLabel)
+
         let col0 = columns[0], col1 = columns[1], col2 = columns[2]
-
         NSLayoutConstraint.activate([
-            col0.topAnchor.constraint(equalTo: sliderContainer.topAnchor),
-            col0.bottomAnchor.constraint(equalTo: sliderContainer.bottomAnchor),
-            col0.leadingAnchor.constraint(equalTo: sliderContainer.leadingAnchor, constant: 2),
-
-            col1.topAnchor.constraint(equalTo: sliderContainer.topAnchor),
-            col1.bottomAnchor.constraint(equalTo: sliderContainer.bottomAnchor),
-            col1.leadingAnchor.constraint(equalTo: col0.trailingAnchor, constant: 2),
+            heading.leadingAnchor.constraint(equalTo: sliderContainer.leadingAnchor, constant: 12),
+            heading.centerYAnchor.constraint(equalTo: autoModeToggle.centerYAnchor),
+            autoModeToggle.topAnchor.constraint(equalTo: sliderContainer.topAnchor, constant: 6),
+            autoModeToggle.trailingAnchor.constraint(equalTo: sliderContainer.trailingAnchor, constant: -12),
+            autoModeToggle.leadingAnchor.constraint(greaterThanOrEqualTo: heading.trailingAnchor, constant: 12),
+            col0.topAnchor.constraint(equalTo: sliderContainer.topAnchor, constant: 36),
+            col0.heightAnchor.constraint(equalToConstant: 72),
+            col0.leadingAnchor.constraint(equalTo: sliderContainer.leadingAnchor, constant: 8),
+            col1.topAnchor.constraint(equalTo: col0.topAnchor),
+            col1.heightAnchor.constraint(equalTo: col0.heightAnchor),
+            col1.leadingAnchor.constraint(equalTo: col0.trailingAnchor, constant: 8),
             col1.widthAnchor.constraint(equalTo: col0.widthAnchor),
-
-            col2.topAnchor.constraint(equalTo: sliderContainer.topAnchor),
-            col2.bottomAnchor.constraint(equalTo: sliderContainer.bottomAnchor),
-            col2.leadingAnchor.constraint(equalTo: col1.trailingAnchor, constant: 2),
+            col2.topAnchor.constraint(equalTo: col0.topAnchor),
+            col2.heightAnchor.constraint(equalTo: col0.heightAnchor),
+            col2.leadingAnchor.constraint(equalTo: col1.trailingAnchor, constant: 8),
             col2.widthAnchor.constraint(equalTo: col0.widthAnchor),
-            col2.trailingAnchor.constraint(equalTo: sliderContainer.trailingAnchor, constant: -28),
-
-            autoModeToggle.trailingAnchor.constraint(equalTo: sliderContainer.trailingAnchor, constant: -4),
-            autoModeToggle.topAnchor.constraint(equalTo: sliderContainer.topAnchor, constant: 4),
+            col2.trailingAnchor.constraint(equalTo: sliderContainer.trailingAnchor, constant: -8),
+            conversationStatusLabel.topAnchor.constraint(equalTo: col0.bottomAnchor, constant: 4),
+            conversationStatusLabel.leadingAnchor.constraint(equalTo: sliderContainer.leadingAnchor, constant: 12),
+            conversationStatusLabel.trailingAnchor.constraint(equalTo: sliderContainer.trailingAnchor, constant: -12),
+            conversationStatusLabel.bottomAnchor.constraint(lessThanOrEqualTo: sliderContainer.bottomAnchor, constant: -6),
         ])
 
         updateSliderEnabled()
     }
 
     private func updateSliderEnabled() {
-        let isManual = !currentPersonality.autoMode
-        let alpha: CGFloat = isManual ? 1.0 : 0.5
+        let isManual = autoModeToggle.selectedSegment == 1
+        let alpha: CGFloat = 1.0
         frequencySlider.isEnabled = isManual
         stanceSlider.isEnabled = isManual
         attitudeSlider.isEnabled = isManual
@@ -427,8 +370,8 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         notifyPersonalityChanged()
     }
 
-    @objc private func autoModeToggled(_ sender: NSButton) {
-        currentPersonality.autoMode = sender.state == .on
+    @objc private func autoModeToggled(_ sender: NSSegmentedControl) {
+        currentPersonality.autoMode = sender.selectedSegment == 0
         updateSliderEnabled()
         notifyPersonalityChanged()
     }
@@ -438,16 +381,19 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         onPersonalityChanged?(currentPersonality)
     }
 
-    /// 外部からパーソナリティを更新（自動モード時の表示反映用）
-    func updatePersonalityDisplay(_ personality: YUiPersonality) {
-        currentPersonality = personality
-        frequencySlider?.doubleValue = Double(personality.responseFrequency)
-        stanceSlider?.doubleValue = Double(personality.dialogueStance)
-        attitudeSlider?.doubleValue = Double(personality.attitude)
-        autoModeToggle?.state = personality.autoMode ? .on : .off
-        frequencyValueLabel?.stringValue = String(format: "%.0f%%", personality.responseFrequency * 100)
-        stanceValueLabel?.stringValue = String(format: "%.0f%%", personality.dialogueStance * 100)
-        attitudeValueLabel?.stringValue = String(format: "%.0f%%", personality.attitude * 100)
+    /// Effective values are display-only; preserve the user's manual values.
+    func updateConversationPlan(_ plan: YUiConversationDirector.Plan, activity: String) {
+        currentPersonality = YUiPersonality.load()
+        let p = plan.personality
+        frequencySlider?.doubleValue = Double(p.responseFrequency)
+        stanceSlider?.doubleValue = Double(p.dialogueStance)
+        attitudeSlider?.doubleValue = Double(p.attitude)
+        autoModeToggle?.selectedSegment = p.autoMode ? 0 : 1
+        frequencyValueLabel?.stringValue = "通常 \(Int(p.baseInterval.rounded()))秒以上"
+        stanceValueLabel?.stringValue = String(format: "%.0f%%", p.dialogueStance * 100)
+        attitudeValueLabel?.stringValue = String(format: "%.0f%%", p.attitude * 100)
+        conversationStatusLabel?.stringValue = "\(activity)\n\(plan.status)"
+        conversationStatusLabel?.toolTip = plan.status
         updateSliderEnabled()
     }
 
@@ -500,11 +446,6 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
 
         let entry = LogEntry(timestamp: now, text: text, isYUi: isYUi, speaker: speakerName, attributedString: line)
         allEntries.append(entry)
-
-        // Update stats
-        let displaySpeaker = speakerName ?? (isYUi ? "YUi" : "システム")
-        speakerCounts[displaySpeaker, default: 0] += 1
-        updateStatsLabel()
 
         if shouldShow(entry: entry) {
             let displayLine = buildDisplayLine(for: entry)
@@ -645,8 +586,6 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
             let entryText = "\u{1F5E3} \(speaker): \(text)"
             let entry = LogEntry(timestamp: now, text: entryText, isYUi: false, speaker: speaker, attributedString: line)
             allEntries.append(entry)
-            speakerCounts[speaker, default: 0] += 1
-            updateStatsLabel()
 
             window?.title = "GravityReader ログ (\(entryCount))"
         } else {
@@ -678,9 +617,6 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         textView?.textStorage?.setAttributedString(NSAttributedString(string: ""))
         entryCount = 0
         allEntries.removeAll()
-        speakerCounts.removeAll()
-        sessionStart = Date()
-        updateStatsLabel()
         window?.title = "GravityReader ログ"
     }
 
@@ -865,30 +801,4 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
 
     // MARK: - Statistics Panel
 
-    @objc private func toggleStats() {
-        statsVisible.toggle()
-        statsContainer.isHidden = !statsVisible
-        updateScrollViewBottomConstraint()
-        if statsVisible {
-            updateStatsLabel()
-        }
-    }
-
-    private func updateStatsLabel() {
-        guard statsVisible || true else { return }  // always compute, show when visible
-
-        let fmt = DateFormatter()
-        fmt.dateFormat = "HH:mm:ss"
-        let startTime = fmt.string(from: sessionStart)
-
-        var lines = "セッション開始: \(startTime) | 総発言数: \(entryCount)\n"
-
-        let sortedSpeakers = speakerCounts.sorted { $0.value > $1.value }
-        let speakerParts = sortedSpeakers.map { "\($0.key): \($0.value)" }
-        if !speakerParts.isEmpty {
-            lines += speakerParts.joined(separator: "  ")
-        }
-
-        statsLabel.stringValue = lines
-    }
 }
