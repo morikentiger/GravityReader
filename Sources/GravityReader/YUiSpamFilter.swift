@@ -63,6 +63,7 @@ struct YUiSpamFilter {
 
     /// 同じ文字や語が異常に繰り返されているか
     static func isRepetitiveSpam(_ text: String) -> Bool {
+        if PhoneticSpamGuard.suppressionReason(original: text, reading: text) != nil { return true }
         // 10文字以上で、ユニーク文字が3種以下 → スパム
         // 例: "おいおいおいおいおいおいおいおいおいおいおいおいおいおいおい"
         if text.count >= 10 {

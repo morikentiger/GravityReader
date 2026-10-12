@@ -2,6 +2,11 @@ import XCTest
 @testable import GravityReader
 
 final class PhoneticSpamGuardTests: XCTestCase {
+    func testVoiceInputAlsoRejectsLongRepeatedSyllables() {
+        XCTAssertTrue(YUiSpamFilter.isRepetitiveSpam("もりけん: あいうえおあいうえおあいうえおあいうえお"))
+        XCTAssertFalse(YUiSpamFilter.isRepetitiveSpam("あいうえおの発音を教えて"))
+    }
+
     func testMixedSpellingsCollapseToRepeatedSound() {
         XCTAssertNotNil(PhoneticSpamGuard.suppressionReason(original: "Mushi 虫 無視 ムシ", reading: "むし むし むし ムシ"))
         XCTAssertNotNil(PhoneticSpamGuard.suppressionReason(original: "25nicoにこniko", reading: "25にこにこにこ"))
