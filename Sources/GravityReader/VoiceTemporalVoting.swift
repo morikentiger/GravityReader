@@ -31,7 +31,7 @@ class VoiceTemporalVoting {
                 lastTopSpeaker = speaker
                 switchCandidateCount = 0
                 switchCandidateSpeaker = ""
-                onLog?("🔄 話者交代検出: → \(speaker)")
+                NSLog("[VoiceTemporalVoting] 話者交代検出: → %@", speaker)
             }
         } else if speaker != "不明" {
             lastTopSpeaker = speaker

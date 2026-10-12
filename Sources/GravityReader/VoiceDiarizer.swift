@@ -73,6 +73,11 @@ class VoiceDiarizer {
 
     var onLog: ((String) -> Void)?
 
+    /// 頻繁な照合結果は会話ログを埋めず、システム診断ログへ送る。
+    private func diagnosticLog(_ message: String) {
+        NSLog("[VoiceDiarizer] %@", message)
+    }
+
     var diagnosticsEnabled: Bool {
         get { profileStore.diagnosticsEnabled }
         set { profileStore.diagnosticsEnabled = newValue }
@@ -153,7 +158,7 @@ class VoiceDiarizer {
             let quality = AudioQualityEvaluator.evaluate(samples: samples, sampleRate: mfccExtractor.sampleRate)
             if !quality.isSufficientForInference {
                 let reasons = quality.failureReasons.joined(separator: ", ")
-                onLog?("🔇 音声品質不足でスキップ: \(reasons)")
+                diagnosticLog("🔇 音声品質不足でスキップ: \(reasons)")
                 return nil
             }
             return embeddingModel.extractEmbedding(from: samples, sampleRate: mfccExtractor.sampleRate)
@@ -313,7 +318,7 @@ class VoiceDiarizer {
                 let simAfter = cosineSimilarity(updated, otherProfile.features)
                 if simAfter > 0.92 {
                     lastAdaptiveRejectedReason = "drift_guard(\(otherName):\(String(format: "%.3f", simAfter)))"
-                    onLog?("🛑 ドリフトガード: \(speaker)の更新却下（\(otherName)との類似度が\(String(format: "%.3f", simAfter))に接近）")
+                    diagnosticLog("🛑 ドリフトガード: \(speaker)の更新却下（\(otherName)との類似度が\(String(format: "%.3f", simAfter))に接近）")
                     return
                 }
             }
@@ -324,7 +329,7 @@ class VoiceDiarizer {
         profileStore.profiles[speaker] = profile
 
         if profile.sampleCount % 50 == 0 {
-            onLog?("🔄 声紋適応更新: \(speaker)（累計\(profile.sampleCount)サ���プル）")
+            diagnosticLog("🔄 声紋適応更新: \(speaker)（累計\(profile.sampleCount)サ���プル）")
             profileStore.saveProfiles()
         }
     }
@@ -349,7 +354,7 @@ class VoiceDiarizer {
         }
 
         let scoreStr = results.map { "\($0.name):\(String(format: "%.3f", $0.similarity))" }.joined(separator: " ")
-        onLog?("🔍 声紋照合(neural): \(scoreStr)")
+        diagnosticLog("🔍 声紋照合(neural): \(scoreStr)")
 
         // スコア正規化
         let speakerNames = results.map { $0.name }
@@ -372,7 +377,7 @@ class VoiceDiarizer {
         let rawBestSim = best.rawSimilarity
 
         if hasEnoughHistory && results.count >= 2 && results[0].name != normalizedResults[0].name {
-            onLog?("📊 スコア正規化で順位変動: \(results[0].name)→\(normalizedResults[0].name)")
+            diagnosticLog("📊 スコア正規化で順位変動: \(results[0].name)→\(normalizedResults[0].name)")
         }
 
         // 判定ロジック
@@ -407,7 +412,7 @@ class VoiceDiarizer {
                 effectiveMargin = effectiveSecond != nil ? effectiveBest.similarity - effectiveSecond!.similarity : 1.0
 
                 let pitchStr = pitchScores.map { "\($0.key):\(String(format: "%.2f", $0.value))" }.joined(separator: " ")
-                onLog?("🎵 ピッチ補正: \(pitchStr)")
+                diagnosticLog("🎵 ピッチ補正: \(pitchStr)")
             }
         }
         lastIdentifySamples = nil
@@ -425,12 +430,12 @@ class VoiceDiarizer {
         } else if effectiveMargin >= softMargin {
             decisionType = "soft"
             voting.addVote(speaker: effectiveBest.name, score: rawBestSim)
-            onLog?("⚠️ マージン不足: \(effectiveBest.name)(\(String(format: "%.3f", effectiveBest.similarity))) vs \(effectiveSecond!.name)(\(String(format: "%.3f", effectiveSecond!.similarity))) margin=\(String(format: "%.3f", effectiveMargin))")
+            diagnosticLog("⚠️ マージン不足: \(effectiveBest.name)(\(String(format: "%.3f", effectiveBest.similarity))) vs \(effectiveSecond!.name)(\(String(format: "%.3f", effectiveSecond!.similarity))) margin=\(String(format: "%.3f", effectiveMargin))")
 
             if let voted = voting.resolveByVoting() {
                 decisionType = "voted"
                 finalDecision = voted.speaker
-                onLog?("🗳 多数決で判定: \(voted.speaker)（\(voted.count)/\(voting.votingWindowSize)票）")
+                diagnosticLog("🗳 多数決で判定: \(voted.speaker)（\(voted.count)/\(voting.votingWindowSize)票）")
                 returnValue = ((voted.speaker, rawBestSim), .estimated)
             } else {
                 finalDecision = "不明"
@@ -441,7 +446,7 @@ class VoiceDiarizer {
             finalDecision = "不明"
             unknownReason = .belowMargin
             voting.addVote(speaker: "不明", score: 0)
-            onLog?("⚠️ マージン不足: \(effectiveBest.name)(\(String(format: "%.3f", effectiveBest.similarity))) vs \(effectiveSecond!.name)(\(String(format: "%.3f", effectiveSecond!.similarity))) margin=\(String(format: "%.3f", effectiveMargin))")
+            diagnosticLog("⚠️ マージン不足: \(effectiveBest.name)(\(String(format: "%.3f", effectiveBest.similarity))) vs \(effectiveSecond!.name)(\(String(format: "%.3f", effectiveSecond!.similarity))) margin=\(String(format: "%.3f", effectiveMargin))")
         }
 
         // 構造化ログ
@@ -481,14 +486,14 @@ class VoiceDiarizer {
         results.sort { $0.distance < $1.distance }
 
         let scoreStr = results.map { "\($0.name):\(String(format: "%.2f", $0.distance))" }.joined(separator: " ")
-        onLog?("🔍 声紋照合(mfcc): \(scoreStr)")
+        diagnosticLog("🔍 声紋照合(mfcc): \(scoreStr)")
 
         guard let best = results.first, best.distance <= maxDistance else { return nil }
 
         if results.count >= 2 {
             let ratio = results[1].distance / max(best.distance, 0.001)
             if ratio < marginRatio {
-                onLog?("⚠️ マージン比不足: \(best.name)(\(String(format: "%.2f", best.distance))) vs \(results[1].name)(\(String(format: "%.2f", results[1].distance))) ratio=\(String(format: "%.3f", ratio))")
+                diagnosticLog("⚠️ マージン比不足: \(best.name)(\(String(format: "%.2f", best.distance))) vs \(results[1].name)(\(String(format: "%.2f", results[1].distance))) ratio=\(String(format: "%.3f", ratio))")
                 return nil
             }
         }
