@@ -9,6 +9,14 @@ final class CommentReadoutGuardTests: XCTestCase {
         XCTAssertNil(guarder.suppressionReason("うんうん、今日は楽しかったね", speaker: "A"))
     }
 
+    func testThreeLongSyllableRunsAndSingleCharacterReplies() {
+        XCTAssertNotNil(CommentReadoutGuard().suppressionReason("あいうえおあいうえおあいうえお・・・", speaker: "A"))
+        for text in ["草", "え", "1", "？", "👍"] {
+            XCTAssertNil(CommentReadoutGuard().suppressionReason(text, speaker: "A"))
+        }
+        XCTAssertNil(CommentReadoutGuard().suppressionReason("あいうえおあいうえおあいうえお、という表記の説明", speaker: "A"))
+    }
+
     func testDuplicateAcrossNamesAndExpiry() {
         let guarder = CommentReadoutGuard()
         let now = Date()

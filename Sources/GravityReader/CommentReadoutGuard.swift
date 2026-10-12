@@ -6,9 +6,12 @@ final class CommentReadoutGuard {
 
     func suppressionReason(_ text: String, speaker: String, now: Date = Date()) -> String? {
         recent.removeAll { now.timeIntervalSince($0.time) > 30 }
-        let normalized = text.precomposedStringWithCompatibilityMapping.lowercased()
-            .filter { !$0.isWhitespace && !$0.isPunctuation }
-        if Self.hasRepeatedRun(normalized) { return "同じ音・語の繰り返し" }
+        let folded = text.precomposedStringWithCompatibilityMapping.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = folded.count == 1 ? folded : folded.filter { !$0.isWhitespace && !$0.isPunctuation }
+        if !PhoneticSpamGuard.isExplanation(text),
+           Self.hasRepeatedRun(normalized) || PhoneticSpamGuard.suppressionReason(original: text, reading: text) != nil {
+            return "同じ音・語の繰り返し"
+        }
         if normalized.isEmpty { return "記号のみ" }
         if text.count > 200 { return "長すぎるコメント" }
         if recent.contains(where: { $0.text == normalized }) { return "直近と同じ内容" }

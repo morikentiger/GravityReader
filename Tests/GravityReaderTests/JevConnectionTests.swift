@@ -63,7 +63,7 @@ final class JevConnectionTests: XCTestCase {
 
     func testSavingConfigurationClearsFailureCooldown() {
         var calls = 0
-        let gate = JevCommentGate { _, _, done in calls += 1; done(.unavailable) }
+        let gate = JevCommentGate { _, _, _, done in calls += 1; done(.unavailable) }
         gate.mode = { 2 }
         gate.submit("one") {}
         gate.submit("two") {}

@@ -111,7 +111,8 @@ class GravityCaptureManager {
         try! NSRegularExpression(pattern: "^[!！](読み一覧|yomi-list)[\\s\u{3000}]*$")
     }()
 
-    private func isUINoiseOrSystemMessage(_ text: String) -> Bool {
+    private func isUINoiseOrSystemMessage(_ text: String, isComment: Bool = false) -> Bool {
+        if isComment && text.count == 1 && text.first?.isWhitespace == false { return false }
         if uiNoiseExact.contains(text) { return true }
         for prefix in uiNoisePrefixes {
             if text.hasPrefix(prefix) { return true }
@@ -120,7 +121,7 @@ class GravityCaptureManager {
         for regex in uiNoisePatterns {
             if regex.firstMatch(in: text, range: range) != nil { return true }
         }
-        if text.count <= 1 { return true }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
         return false
     }
 
@@ -406,6 +407,7 @@ class GravityCaptureManager {
 
     init(statusBar: StatusBarController) {
         self.statusBar = statusBar
+        jevGate.normalize = { [weak self] text, done in self?.speechManager.prepareReadout(text, completion: done) }
         jevGate.onLog = { [weak self] message in self?.logWindow?.addEntry(message) }
     }
 
@@ -540,7 +542,7 @@ class GravityCaptureManager {
             // AXGenericElement = メッセージ本文
             let text = entry.text
 
-            if isUINoiseOrSystemMessage(text) {
+            if isUINoiseOrSystemMessage(text, isComment: true) {
                 spokenHistory.insert(text)
                 i += 1
                 continue
@@ -557,14 +559,14 @@ class GravityCaptureManager {
 
             let user = lastDetectedUser
             if roomTranscription?.isEnrolling != true {
-                jevGate.submit(text) { [weak self] in self?.deliverComment(text, user: user) }
+                jevGate.submitPrepared(text) { [weak self] reading in self?.deliverComment(text, reading: reading, user: user) }
             }
 
             i += 1
         }
     }
 
-    private func deliverComment(_ text: String, user: String?) {
+    private func deliverComment(_ text: String, reading: String, user: String?) {
         guard roomTranscription?.isEnrolling != true else { return }
         if handleVoiceCommand(text) || handleReadingCommand(text) { return }
         _ = handleJoinLeaveMessage(text)
@@ -572,9 +574,9 @@ class GravityCaptureManager {
         logWindow?.addEntry(user.map { "[\($0)] \(text)" } ?? text)
         if isTTSEnabled {
             if let user = user {
-                if !YUiSpamFilter.isIgnoredUser(user) { speechManager.speak(text, forUser: user) }
+                if !YUiSpamFilter.isIgnoredUser(user) { speechManager.speakPrepared(reading, forUser: user) }
             } else {
-                speechManager.speak(text)
+                speechManager.speakPrepared(reading, forUser: nil)
             }
         }
         let commentMsg = "\(user ?? "")[コメント]: \(text)"

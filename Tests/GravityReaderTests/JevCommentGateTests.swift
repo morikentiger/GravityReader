@@ -16,7 +16,7 @@ final class JevCommentGateTests: XCTestCase {
     }
 
     func testObservationDoesNotDropAndSuppressionDoes() {
-        let gate = JevCommentGate { _, _, done in done(.spam) }
+        let gate = JevCommentGate { _, _, _, done in done(.spam) }
         var count = 0
         gate.mode = { 1 }
         gate.submit("test") { count += 1 }
@@ -28,7 +28,7 @@ final class JevCommentGateTests: XCTestCase {
 
     func testOrderResetAndLateCallback() {
         var callbacks: [(JevCommentGate.Verdict) -> Void] = []
-        let gate = JevCommentGate { _, _, done in callbacks.append(done) }
+        let gate = JevCommentGate { _, _, _, done in callbacks.append(done) }
         gate.mode = { 2 }
         var delivered: [Int] = []
         gate.submit("first") { delivered.append(1) }
@@ -44,7 +44,7 @@ final class JevCommentGateTests: XCTestCase {
 
     func testFailureFallsBackAndStopsRepeatedRequests() {
         var calls = 0
-        let gate = JevCommentGate { _, _, done in calls += 1; done(.unavailable) }
+        let gate = JevCommentGate { _, _, _, done in calls += 1; done(.unavailable) }
         gate.mode = { 2 }
         var delivered = 0
         gate.submit("first") { delivered += 1 }
@@ -55,7 +55,7 @@ final class JevCommentGateTests: XCTestCase {
 
     func testDisableWhileWaitingDoesNotSuppress() {
         var completion: ((JevCommentGate.Verdict) -> Void)?
-        let gate = JevCommentGate { _, _, done in completion = done }
+        let gate = JevCommentGate { _, _, _, done in completion = done }
         gate.mode = { 2 }
         var delivered = false
         gate.submit("test") { delivered = true }
@@ -66,7 +66,7 @@ final class JevCommentGateTests: XCTestCase {
 
     func testQueueIsBounded() {
         var callback: ((JevCommentGate.Verdict) -> Void)?
-        let gate = JevCommentGate { _, _, done in callback = done }
+        let gate = JevCommentGate { _, _, _, done in callback = done }
         gate.mode = { 2 }
         var delivered = 0
         for index in 0..<20 { gate.submit(String(index)) { delivered += 1 } }
@@ -79,7 +79,7 @@ final class JevCommentGateTests: XCTestCase {
     func testTimeoutReleasesCommentOnce() {
         let finished = expectation(description: "timeout fallback")
         var late: ((JevCommentGate.Verdict) -> Void)?
-        let gate = JevCommentGate(deadlineSeconds: 0.05) { _, _, done in late = done }
+        let gate = JevCommentGate(deadlineSeconds: 0.05) { _, _, _, done in late = done }
         gate.mode = { 2 }
         var delivered = 0
         gate.submit("test") { delivered += 1; finished.fulfill() }

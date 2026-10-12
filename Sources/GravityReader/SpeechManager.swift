@@ -26,7 +26,7 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     private var nextSpeechWork: DispatchWorkItem?
     private var nextSpeechDate = Date.distantPast
     private var speechBurstStarted: Date?
-    private var queue: [(text: String, voice: VoiceMode)] = []
+    private var queue: [(text: String, voice: VoiceMode, prepared: Bool)] = []
     private(set) var isSpeaking = false {
         didSet {
             if oldValue != isSpeaking {
@@ -103,20 +103,38 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     /// テキストをデフォルト音声で読み上げ
     func speak(_ text: String) {
-        queue.append((text: text, voice: voiceMode))
+        queue.append((text: text, voice: voiceMode, prepared: false))
         speakNext()
     }
 
     /// テキストを指定した音声で読み上げ
     func speak(_ text: String, withVoice voice: VoiceMode) {
-        queue.append((text: text, voice: voice))
+        queue.append((text: text, voice: voice, prepared: false))
         speakNext()
     }
 
     /// テキストをユーザー固有音声で読み上げ（未設定なら自動割り当て）
     func speak(_ text: String, forUser user: String) {
         let voice = resolveVoice(for: user)
-        queue.append((text: text, voice: voice))
+        queue.append((text: text, voice: voice, prepared: false))
+        speakNext()
+    }
+
+    /// Produce the exact text subsequently inspected by moderation and sent to TTS.
+    func prepareReadout(_ text: String, completion: @escaping (String) -> Void) {
+        let ready: (String) -> Void = { [weak self] normalized in
+            guard self != nil else { return }
+            let prepared = TextPronunciation.prepare(normalized, romajiEnabled: AppDefaults.suite.object(forKey: "GR_RomajiReadingEnabled") as? Bool ?? true)
+            completion(prepared.text)
+        }
+        let input = TextPronunciation.prepare(text, romajiEnabled: false).language == "ja-JP" ? applyReadingDictionary(text) : text
+        if let normalizer = readingNormalizer { normalizer.normalize(input, completion: ready) }
+        else { ready(input) }
+    }
+
+    func speakPrepared(_ text: String, forUser user: String?) {
+        let voice = user.map { resolveVoice(for: $0) } ?? voiceMode
+        queue.append((text: text, voice: voice, prepared: true))
         speakNext()
     }
 
@@ -334,8 +352,8 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
             guard let self = self, self.speechGeneration == generation, self.isPreparingSpeech else { return }
             self.startPreparedSpeech(text, voice: item.voice, generation: generation)
         }
-        if let normalizer = readingNormalizer { normalizer.normalize(item.text, completion: ready) }
-        else { ready(item.text) }
+        if item.prepared { ready(item.text) }
+        else { prepareReadout(item.text, completion: ready) }
     }
 
     private func startPreparedSpeech(_ text: String, voice: VoiceMode, generation: UUID) {
@@ -346,7 +364,7 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
             return
         }
-        let prepared = TextPronunciation.prepare(text, romajiEnabled: AppDefaults.suite.object(forKey: "GR_RomajiReadingEnabled") as? Bool ?? true)
+        let prepared = TextPronunciation.prepare(text, romajiEnabled: false)
         if prepared.language == "en-US", voice != .fishAudio { speakWithSystem(prepared.text); return }
         switch voice {
         case .fishAudio: speakWithFishAudio(prepared.text)
@@ -364,8 +382,8 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     private func speakWithSystem(_ text: String) {
         if deferForHumanSpeech({ [weak self] in self?.speakWithSystem(text) }) { return }
-        let prepared = TextPronunciation.prepare(text, romajiEnabled: AppDefaults.suite.object(forKey: "GR_RomajiReadingEnabled") as? Bool ?? true)
-        let processed = prepared.language == "ja-JP" ? applyReadingDictionary(prepared.text) : prepared.text
+        let prepared = TextPronunciation.prepare(text, romajiEnabled: false)
+        let processed = text
         let utterance = AVSpeechUtterance(string: processed)
         utterance.voice = AVSpeechSynthesisVoice(language: prepared.language)
         let savedRate = AppDefaults.suite.float(forKey: "GR_SpeechRate")
@@ -420,7 +438,7 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
             speakWithSystem(text)
             return
         }
-        components.queryItems = [URLQueryItem(name: "text", value: applyReadingDictionary(text)),
+        components.queryItems = [URLQueryItem(name: "text", value: text),
                                  URLQueryItem(name: "speaker", value: String(speaker))]
         guard let queryURL = components.url else { speakWithSystem(text); return }
         var queryRequest = URLRequest(url: queryURL, timeoutInterval: 10)

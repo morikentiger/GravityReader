@@ -45,7 +45,7 @@ final class JevSettingsView: NSView {
         addSubview(connectionStatus)
         refreshConnectionStatus()
         statusObserver = NotificationCenter.default.addObserver(forName: JevConnection.statusChanged, object: nil, queue: .main) { [weak self] _ in self?.refreshConnectionStatus() }
-        label("有効時は本文と直近3件をTypeSafeへ送信。接続テストは固定の挨拶文を送信します。失敗時は既存フィルタを使います。", 3)
+        label("有効時は原文・読み方・直近3件をTypeSafeへ送信。接続テストは固定の挨拶文を送信します。失敗時は既存フィルタを使います。", 3)
         let link = NSButton(title: "TypeSafeのAPIコンソール", target: self, action: #selector(openConsole))
         link.frame = NSRect(x: 230, y: 105, width: 225, height: 30)
         link.bezelStyle = .rounded

@@ -25,7 +25,7 @@ enum JevConnection {
         }
     }
 
-    static func check(text: String = "こんにちは、今日はいい天気ですね。", context: [String] = [], completion: @escaping (JevCommentGate.Verdict, String) -> Void) {
+    static func check(text: String = "こんにちは、今日はいい天気ですね。", reading: String? = nil, context: [String] = [], completion: @escaping (JevCommentGate.Verdict, String) -> Void) {
         // Credential access can include a macOS prompt and must not share the network deadline.
         DispatchQueue.global(qos: .userInitiated).async {
             let key = KeychainHelper.load(key: JevCommentGate.keychainKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -33,12 +33,12 @@ enum JevConnection {
                 DispatchQueue.main.async { completion(.unavailable, "APIキー未取得。保存状態とmacOSのキーチェーン許可を確認してください") }
                 return
             }
-            send(text: text, context: context, key: key, completion: completion)
+            send(text: text, context: context, key: key, reading: reading, completion: completion)
         }
     }
 
-    static func send(text: String, context: [String], key: String, session: URLSession = .shared, completion: @escaping (JevCommentGate.Verdict, String) -> Void) {
-        guard let request = try? JevCommentGate.makeRequest(text: text, context: context, key: key) else {
+    static func send(text: String, context: [String], key: String, reading: String? = nil, session: URLSession = .shared, completion: @escaping (JevCommentGate.Verdict, String) -> Void) {
+        guard let request = try? JevCommentGate.makeRequest(text: text, context: context, key: key, reading: reading) else {
             DispatchQueue.main.async { completion(.unavailable, "判定リクエストを作成できません") }
             return
         }
