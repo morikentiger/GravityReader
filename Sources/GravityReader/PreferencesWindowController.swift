@@ -45,6 +45,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
 
     // API tab
     private var apiKeyField: NSSecureTextField!
+    private var keyStatusGeneration = 0
     private var apiKeyStatusLabel: NSTextField!
     private var modelGPT4oButton: NSButton!
     private var modelMiniButton: NSButton!
@@ -123,8 +124,6 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         apiKeyField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         apiKeyField.target = self
         apiKeyField.action = #selector(apiKeyChanged(_:))
-        let currentKey = KeychainHelper.load(key: PrefKey.openAIAPIKey) ?? ""
-        if !currentKey.isEmpty { apiKeyField.stringValue = currentKey }
         view.addSubview(apiKeyField)
 
         let saveKeyBtn = NSButton(title: "保存", target: self, action: #selector(saveAPIKey(_:)))
@@ -169,7 +168,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         let freqLabel = makeLabel("応答頻度:", frame: NSRect(x: 20, y: 280, width: 100, height: 20))
         view.addSubview(freqLabel)
 
-        frequencySegmented = NSSegmentedControl(labels: ["高（20秒）", "中（1分）", "低（3分）"], trackingMode: .selectOne, target: self, action: #selector(frequencyChanged(_:)))
+        frequencySegmented = NSSegmentedControl(labels: ["よく話す", "ふつう", "控えめ"], trackingMode: .selectOne, target: self, action: #selector(frequencyChanged(_:)))
         frequencySegmented.frame = NSRect(x: 130, y: 278, width: 320, height: 24)
         let savedFreq = YUiFrequency(rawValue: AppDefaults.suite.string(forKey: PrefKey.frequency) ?? "") ?? .high
         switch savedFreq {
@@ -180,17 +179,17 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         view.addSubview(frequencySegmented)
 
         // --- 孤独感システム ---
-        let loneLabel = makeLabel("孤独感システム:", frame: NSRect(x: 20, y: 230, width: 130, height: 20))
+        let loneLabel = makeLabel("すねる・甘える演出:", frame: NSRect(x: 20, y: 230, width: 130, height: 20))
         view.addSubview(loneLabel)
 
         lonelinessToggle = NSSwitch(frame: NSRect(x: 160, y: 228, width: 40, height: 24))
-        let loneEnabled = AppDefaults.suite.object(forKey: PrefKey.lonelinessEnabled) as? Bool ?? true
+        let loneEnabled = AppDefaults.suite.object(forKey: PrefKey.lonelinessEnabled) as? Bool ?? false
         lonelinessToggle.state = loneEnabled ? .on : .off
         lonelinessToggle.target = self
         lonelinessToggle.action = #selector(lonelinessToggled(_:))
         view.addSubview(lonelinessToggle)
 
-        let loneDesc = makeLabel("YUiが無視されると不安になる演出", frame: NSRect(x: 210, y: 230, width: 260, height: 18))
+        let loneDesc = makeLabel("反応がない時にすねる演出（通常はオフ）", frame: NSRect(x: 210, y: 230, width: 260, height: 18))
         loneDesc.font = .systemFont(ofSize: 11)
         loneDesc.textColor = .secondaryLabelColor
         view.addSubview(loneDesc)
@@ -409,14 +408,18 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
     }
 
     private func updateAPIKeyStatus() {
-        let key = KeychainHelper.load(key: PrefKey.openAIAPIKey) ?? ""
-        if key.isEmpty {
-            apiKeyStatusLabel.stringValue = "状態: 未設定"
-            apiKeyStatusLabel.textColor = NSColor.systemOrange
-        } else {
-            let masked = String(key.prefix(7)) + "..." + String(key.suffix(4))
-            apiKeyStatusLabel.stringValue = "状態: 設定済み (\(masked))"
-            apiKeyStatusLabel.textColor = NSColor.systemGreen
+        keyStatusGeneration += 1
+        let generation = keyStatusGeneration
+        apiKeyStatusLabel.stringValue = "状態: キーチェーンを確認中"
+        apiKeyStatusLabel.textColor = .secondaryLabelColor
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let key = KeychainHelper.load(key: PrefKey.openAIAPIKey) ?? ""
+            DispatchQueue.main.async {
+                guard let self = self, self.keyStatusGeneration == generation else { return }
+                self.apiKeyStatusLabel.stringValue = key.isEmpty ? "状態: 未設定" : "状態: 設定済み"
+                self.apiKeyStatusLabel.textColor = key.isEmpty ? .systemOrange : .systemGreen
+                if self.apiKeyField.stringValue.isEmpty { self.apiKeyField.stringValue = key }
+            }
         }
     }
 

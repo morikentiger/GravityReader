@@ -38,6 +38,7 @@ class StatusBarController {
     private(set) var isTTSEnabled = true
     private(set) var isYUiEnabled = true
     private var ttsToggleMenuItem: NSMenuItem!
+    private var modelMenuItem: NSMenuItem?
     private var yuiToggleMenuItem: NSMenuItem!
 
     private var voiceSubmenu: NSMenu!
@@ -70,7 +71,7 @@ class StatusBarController {
 
         menu.addItem(.separator())
 
-        toggleMenuItem = NSMenuItem(title: "▶ 開始", action: #selector(toggleReading), keyEquivalent: "")
+        toggleMenuItem = NSMenuItem(title: "開始", action: #selector(toggleReading), keyEquivalent: "")
         toggleMenuItem.target = self
         menu.addItem(toggleMenuItem)
 
@@ -133,15 +134,17 @@ class StatusBarController {
         let modelItem = NSMenuItem(title: isMin ? "✓ gpt-4o-mini（節約）" : "  gpt-4o-mini（節約）", action: #selector(toggleModel), keyEquivalent: "")
         modelItem.target = self
         modelItem.tag = 999
+        modelMenuItem = modelItem
+        modelItem.state = isMin ? .on : .off
         menu.addItem(modelItem)
 
         // YUi応答頻度サブメニュー
         frequencySubmenu = NSMenu()
         let currentFreq = YUiFrequency(rawValue: AppDefaults.suite.string(forKey: "YUiFrequency") ?? "") ?? .high
         for freq in YUiFrequency.allCases {
-            let prefix = freq == currentFreq ? "✓ " : "  "
-            let item = NSMenuItem(title: "\(prefix)\(freq.rawValue)", action: #selector(selectFrequency(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: freq.rawValue, action: #selector(selectFrequency(_:)), keyEquivalent: "")
             item.target = self
+            item.state = freq == currentFreq ? .on : .off
             item.representedObject = freq
             frequencySubmenu.addItem(item)
         }
@@ -193,7 +196,69 @@ class StatusBarController {
         let quitItem = NSMenuItem(title: "終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quitItem)
 
+        // 日常操作を上に、細かな設定と診断をサブメニューへ。
+        menu.removeAllItems()
+        toggleMenuItem.title = "開始"
+        ttsToggleMenuItem.title = "コメントを読み上げる"
+        ttsToggleMenuItem.state = .on
+        yuiToggleMenuItem.title = "YUiが会話に参加する"
+        yuiToggleMenuItem.state = .on
+        showLogItem.title = "会話ログを開く…"
+        experiencesItem.title = "経験ノートを開く…"
+        catchUpItem.title = "直近の会話を要約"
+        prefsItem.title = "設定…"
+        voiceMenuItem.title = "読み上げ音声"
+        userVoiceMenuItem.title = "人ごとの音声"
+        enrollMenuItem.title = "声紋を登録"
+        freqMenuItem.title = "応答頻度"
+        modelItem.title = "節約モデルを使う"
+        apiKeyItem.title = "APIキーを設定…"
+        testItem.title = "音声をテスト"
+        dumpItem.title = "アクセシビリティ診断"
+        let voiceOptions = NSMenu()
+        [voiceMenuItem, userVoiceMenuItem, enrollMenuItem, testItem].forEach { voiceOptions.addItem($0) }
+        let voiceParent = NSMenuItem(title: "音声と声紋", action: nil, keyEquivalent: "")
+        voiceParent.submenu = voiceOptions
+        let yuiOptions = NSMenu()
+        [freqMenuItem, modelItem].forEach { yuiOptions.addItem($0) }
+        let yuiParent = NSMenuItem(title: "YUiの応答", action: nil, keyEquivalent: "")
+        yuiParent.submenu = yuiOptions
+        let advancedOptions = NSMenu()
+        [apiKeyItem, dumpItem].forEach { advancedOptions.addItem($0) }
+        let advancedParent = NSMenuItem(title: "詳細・診断", action: nil, keyEquivalent: "")
+        advancedParent.submenu = advancedOptions
+        [statusMenuItem, toggleMenuItem, .separator(), ttsToggleMenuItem, yuiToggleMenuItem,
+         .separator(), showLogItem, experiencesItem, catchUpItem, .separator(),
+         voiceParent, yuiParent, prefsItem, advancedParent, .separator(), quitItem].forEach { menu.addItem($0) }
         statusItem.menu = menu
+
+        // 通常のアプリメニューからも画面を開けるようにする。
+        let mainMenu = NSMenu()
+        let appMenuItem = NSMenuItem(title: "GravityReader", action: nil, keyEquivalent: "")
+        let appMenu = NSMenu(title: "GravityReader")
+        let settings = NSMenuItem(title: "設定…", action: #selector(showPreferences), keyEquivalent: ",")
+        settings.target = self
+        appMenu.addItem(settings)
+        appMenu.addItem(.separator())
+        let hide = NSMenuItem(title: "GravityReaderを隠す", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        hide.target = NSApp
+        appMenu.addItem(hide)
+        let quit = NSMenuItem(title: "GravityReaderを終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        appMenu.addItem(quit)
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+        let displayItem = NSMenuItem(title: "表示", action: nil, keyEquivalent: "")
+        let displayMenu = NSMenu(title: "表示")
+        let log = NSMenuItem(title: "会話ログ", action: #selector(showLog), keyEquivalent: "l")
+        log.target = self
+        displayMenu.addItem(log)
+        let experiences = NSMenuItem(title: "経験ノート", action: #selector(showExperiences), keyEquivalent: "e")
+        experiences.target = self
+        displayMenu.addItem(experiences)
+        displayItem.submenu = displayMenu
+        mainMenu.addItem(displayItem)
+        NSApp.mainMenu = mainMenu
     }
 
     @objc private func showExperiences() {
@@ -344,10 +409,10 @@ class StatusBarController {
     @objc private func toggleReading() {
         isRunning.toggle()
         if isRunning {
-            toggleMenuItem.title = "⏹ 停止"
+            toggleMenuItem.title = "停止"
             updateStatusDisplay()
         } else {
-            toggleMenuItem.title = "▶ 開始"
+            toggleMenuItem.title = "開始"
             statusMenuItem.title = "停止中"
             statusItem.button?.title = "📖"
         }
@@ -356,14 +421,14 @@ class StatusBarController {
 
     @objc private func toggleTTS() {
         isTTSEnabled.toggle()
-        ttsToggleMenuItem.title = isTTSEnabled ? "🔊 読み上げ: ON" : "🔇 読み上げ: OFF"
+        ttsToggleMenuItem.state = isTTSEnabled ? .on : .off
         updateStatusDisplay()
         onTTSToggle?(isTTSEnabled)
     }
 
     @objc private func toggleYUi() {
         isYUiEnabled.toggle()
-        yuiToggleMenuItem.title = isYUiEnabled ? "💬 YUiコメント: ON" : "🙊 YUiコメント: OFF"
+        yuiToggleMenuItem.state = isYUiEnabled ? .on : .off
         updateStatusDisplay()
         onYUiToggle?(isYUiEnabled)
     }
@@ -383,8 +448,7 @@ class StatusBarController {
         // チェックマーク更新
         for item in frequencySubmenu.items {
             if let itemFreq = item.representedObject as? YUiFrequency {
-                let prefix = itemFreq == freq ? "✓ " : "  "
-                item.title = "\(prefix)\(itemFreq.rawValue)"
+                item.state = itemFreq == freq ? .on : .off
             }
         }
         onFrequencyChanged?(freq)
@@ -392,12 +456,7 @@ class StatusBarController {
 
     @objc private func toggleModel() {
         guard let newVal = onModelToggle?() else { return }
-        // メニュー項目のチェック更新
-        if let menu = statusItem.menu {
-            for item in menu.items where item.tag == 999 {
-                item.title = newVal ? "✓ gpt-4o-mini（節約）" : "  gpt-4o-mini（節約）"
-            }
-        }
+        modelMenuItem?.state = newVal ? .on : .off
     }
 
     // MARK: - Voice selection
