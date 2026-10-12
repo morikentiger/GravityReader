@@ -1,6 +1,7 @@
 import AppKit
 
 class GravityCaptureManager {
+    private let commentReadoutGuard = CommentReadoutGuard()
     private var statusBar: StatusBarController?
     var logWindow: LogWindowController?
     private var timer: Timer?
@@ -549,6 +550,12 @@ class GravityCaptureManager {
 
             guard !spokenHistory.contains(text) else { i += 1; continue }
             spokenHistory.insert(text)
+
+            if let reason = commentReadoutGuard.suppressionReason(text, speaker: lastDetectedUser ?? "不明") {
+                logWindow?.addEntry("🔇 コメント読み上げ抑制（\(reason)）: \(text)")
+                i += 1
+                continue
+            }
 
             // 入退室メッセージの処理
             handleJoinLeaveMessage(text)
