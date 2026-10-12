@@ -21,6 +21,7 @@ class StatusBarController {
     var onToggle: ((Bool) -> Void)?
     var onTest: (() -> Void)?
     var onShowLog: (() -> Void)?
+    var onShowExperiences: (() -> Void)?
     var onDumpAXTree: (() -> Void)?
     var onSetAPIKey: ((String) -> Void)?
     var onVoiceChanged: ((VoiceMode) -> Void)?
@@ -93,6 +94,10 @@ class StatusBarController {
         let showLogItem = NSMenuItem(title: "📋 ログを表示", action: #selector(showLog), keyEquivalent: "l")
         showLogItem.target = self
         menu.addItem(showLogItem)
+
+        let experiencesItem = NSMenuItem(title: "🌱 YUiの経験", action: #selector(showExperiences), keyEquivalent: "")
+        experiencesItem.target = self
+        menu.addItem(experiencesItem)
 
         let testItem = NSMenuItem(title: "🔊 テスト読み上げ", action: #selector(testSpeech), keyEquivalent: "t")
         testItem.target = self
@@ -189,6 +194,10 @@ class StatusBarController {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+    }
+
+    @objc private func showExperiences() {
+        DispatchQueue.main.async { [weak self] in self?.onShowExperiences?() }
     }
 
     @objc private func showLog() {

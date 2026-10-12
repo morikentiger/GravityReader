@@ -12,6 +12,7 @@ class YUiExperienceManager {
     }
 
     var onLog: ((String) -> Void)?
+    var onExperiencesChanged: (() -> Void)?
     private(set) var experienceCache: [Experience] = []
 
     private static var experienceFileURL: URL {
@@ -55,7 +56,8 @@ class YUiExperienceManager {
         experienceCache.append(newExp)
         saveExperiences()
         NSLog("[YUi] 新しい経験を追加: \(exp.event)")
-        onLog?("🌱 YUi経験+1（計\(experienceCache.count)件）: \(exp.event)\n感情: \(exp.emotion)\n学び: \(exp.learning)")
+        onLog?("🌱 経験を追加（計\(experienceCache.count)件）— メニューの「YUiの経験」で確認")
+        onExperiencesChanged?()
     }
 
     /// クエリに関連する経験を検索する（日本語bigramマッチ）

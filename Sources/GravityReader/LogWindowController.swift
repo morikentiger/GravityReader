@@ -72,15 +72,16 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 300, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 700),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.title = "GravityReader ログ"
-        window.minSize = NSSize(width: 240, height: 400)
+        window.minSize = NSSize(width: 520, height: 440)
         window.level = .floating
         window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = NSColor(white: 0.12, alpha: 1)
 
         self.init(window: window)
@@ -91,8 +92,8 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         if let screen = NSScreen.main {
             let sw = screen.visibleFrame
             window.setFrame(NSRect(
-                x: sw.maxX - 308, y: sw.midY - 350,
-                width: 300, height: 700
+                x: sw.maxX - 648, y: sw.midY - 350,
+                width: 640, height: 700
             ), display: false)
         }
     }
@@ -143,7 +144,7 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
             searchBarContainer.topAnchor.constraint(equalTo: contentView.topAnchor),
             searchBarContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             searchBarContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            searchBarContainer.heightAnchor.constraint(equalToConstant: 32),
+            searchBarContainer.heightAnchor.constraint(equalToConstant: 40),
 
             searchField.leadingAnchor.constraint(equalTo: searchBarContainer.leadingAnchor, constant: 4),
             searchField.centerYAnchor.constraint(equalTo: searchBarContainer.centerYAnchor),
@@ -205,8 +206,8 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         textView.isSelectable = true
         textView.backgroundColor = NSColor(white: 0.12, alpha: 1)
         textView.textColor = NSColor(white: 0.9, alpha: 1)
-        textView.font = .systemFont(ofSize: 13)
-        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.font = .systemFont(ofSize: 14)
+        textView.textContainerInset = NSSize(width: 12, height: 12)
 
         // Context menu for bookmarks
         let menu = NSMenu()
@@ -224,7 +225,7 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
             sliderContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             sliderContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             sliderContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            sliderContainer.heightAnchor.constraint(equalToConstant: 72),
+            sliderContainer.heightAnchor.constraint(equalToConstant: 92),
 
             // Stats toggle button above slider container
             statsToggleButton.bottomAnchor.constraint(equalTo: sliderContainer.topAnchor, constant: -2),
@@ -283,10 +284,10 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
     // MARK: - Personality Slider Panel
 
     private func buildSliderPanel() {
-        let labelColor = NSColor(white: 0.55, alpha: 1)
+        let labelColor = NSColor(white: 0.78, alpha: 1)
         let valueColor = NSColor(white: 0.8, alpha: 1)
-        let labelFont = NSFont.systemFont(ofSize: 9, weight: .medium)
-        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+        let labelFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
 
         // 3つのスライダーを横に並べる
         // 各スライダー: ラベル(上) + スライダー(中) + 値ラベル(下)
@@ -326,7 +327,7 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
             // ヒントラベル
             let hintLabel = NSTextField(labelWithString: hint)
             hintLabel.translatesAutoresizingMaskIntoConstraints = false
-            hintLabel.font = NSFont.systemFont(ofSize: 8)
+            hintLabel.font = NSFont.systemFont(ofSize: 10)
             hintLabel.textColor = labelColor
             hintLabel.alignment = .center
             col.addSubview(hintLabel)
@@ -366,7 +367,7 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         // Auto mode toggle (右端に小さく)
         autoModeToggle = NSButton(checkboxWithTitle: "自動", target: self, action: #selector(autoModeToggled(_:)))
         autoModeToggle.translatesAutoresizingMaskIntoConstraints = false
-        autoModeToggle.font = NSFont.systemFont(ofSize: 9)
+        autoModeToggle.font = NSFont.systemFont(ofSize: 11)
         autoModeToggle.contentTintColor = valueColor
         autoModeToggle.state = currentPersonality.autoMode ? .on : .off
         sliderContainer.addSubview(autoModeToggle)
@@ -482,15 +483,15 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         line.append(NSAttributedString(
             string: "\(time) ",
             attributes: [
-                .foregroundColor: NSColor(white: 0.45, alpha: 1),
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+                .foregroundColor: NSColor(white: 0.68, alpha: 1),
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
             ]
         ))
         line.append(NSAttributedString(
             string: text + "\n",
             attributes: [
                 .foregroundColor: textColor,
-                .font: NSFont.systemFont(ofSize: 13)
+                .font: NSFont.systemFont(ofSize: 14)
             ]
         ))
 
@@ -544,15 +545,15 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
         line.append(NSAttributedString(
             string: "\(time) ",
             attributes: [
-                .foregroundColor: NSColor(white: 0.45, alpha: 1),
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+                .foregroundColor: NSColor(white: 0.68, alpha: 1),
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
             ]
         ))
         line.append(NSAttributedString(
             string: "\u{1F5E3} " + text + "\n",
             attributes: [
-                .foregroundColor: NSColor(red: 1.0, green: 0.85, blue: 0.4, alpha: 0.7),
-                .font: NSFont.systemFont(ofSize: 13)
+                .foregroundColor: NSColor(red: 1.0, green: 0.85, blue: 0.4, alpha: 1),
+                .font: NSFont.systemFont(ofSize: 14)
             ]
         ))
 
@@ -611,15 +612,15 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
             line.append(NSAttributedString(
                 string: "\(time) ",
                 attributes: [
-                    .foregroundColor: NSColor(white: 0.45, alpha: 1),
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+                    .foregroundColor: NSColor(white: 0.68, alpha: 1),
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
                 ]
             ))
             line.append(NSAttributedString(
                 string: "\u{1F5E3} \(speaker): \(text)\n",
                 attributes: [
                     .foregroundColor: NSColor(white: 0.92, alpha: 1),
-                    .font: NSFont.systemFont(ofSize: 13)
+                    .font: NSFont.systemFont(ofSize: 14)
                 ]
             ))
 
@@ -783,7 +784,7 @@ class LogWindowController: NSWindowController, NSTextFieldDelegate, NSMenuDelega
                 string: "\u{2503} ",
                 attributes: [
                     .foregroundColor: NSColor(red: 0.95, green: 0.7, blue: 0.2, alpha: 1),
-                    .font: NSFont.systemFont(ofSize: 13)
+                    .font: NSFont.systemFont(ofSize: 14)
                 ]
             ))
             result.append(entry.attributedString)

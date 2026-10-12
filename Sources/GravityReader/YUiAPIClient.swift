@@ -33,7 +33,8 @@ class YUiAPIClient {
         let body: [String: Any] = [
             "model": modelName,
             "messages": messages,
-            "temperature": 0.8
+            "temperature": 0.8,
+            "max_tokens": 600
         ]
 
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)

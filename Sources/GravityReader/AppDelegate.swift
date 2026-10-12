@@ -8,6 +8,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var yuiManager: YUiManager?
     private var voiceManager: VoiceTranscriptionManager?
     private var roomTranscription: RoomTranscriptionManager?
+    private var experienceWindowController: ExperienceWindowController?
     private var preferencesController: PreferencesWindowController?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
@@ -20,6 +21,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         captureManager?.logWindow = logWindowController
 
         yuiManager = YUiManager()
+        yuiManager?.experienceManager.onExperiencesChanged = { [weak self] in
+            guard let self = self else { return }
+            self.experienceWindowController?.refresh(self.yuiManager?.experienceManager.experienceCache ?? [])
+        }
+        statusBarController?.onShowExperiences = { [weak self] in
+            guard let self = self else { return }
+            if self.experienceWindowController == nil {
+                self.experienceWindowController = ExperienceWindowController()
+            }
+            self.experienceWindowController?.showExperiences(self.yuiManager?.experienceManager.experienceCache ?? [])
+        }
 
         // パーソナリティスライダー連携
         logWindowController?.onPersonalityChanged = { [weak self] personality in
