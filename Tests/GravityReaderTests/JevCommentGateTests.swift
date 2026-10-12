@@ -79,7 +79,7 @@ final class JevCommentGateTests: XCTestCase {
     func testTimeoutReleasesCommentOnce() {
         let finished = expectation(description: "timeout fallback")
         var late: ((JevCommentGate.Verdict) -> Void)?
-        let gate = JevCommentGate { _, _, done in late = done }
+        let gate = JevCommentGate(deadlineSeconds: 0.05) { _, _, done in late = done }
         gate.mode = { 2 }
         var delivered = 0
         gate.submit("test") { delivered += 1; finished.fulfill() }

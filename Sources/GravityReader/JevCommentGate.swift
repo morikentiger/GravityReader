@@ -14,8 +14,26 @@ final class JevCommentGate {
     private var lastNotice = Date.distantPast
     private var timeout: DispatchWorkItem?
     private let evaluate: Evaluate
+    private let diagnosticsEnabled: Bool
+    private let deadlineSeconds: TimeInterval
+    private var configurationObserver: NSObjectProtocol?
+    private var reportedSuccess = false
 
-    init(evaluate: @escaping Evaluate = JevCommentGate.request) { self.evaluate = evaluate }
+    init(deadlineSeconds: TimeInterval = 8, evaluate: Evaluate? = nil) {
+        self.evaluate = evaluate ?? Self.request
+        self.diagnosticsEnabled = evaluate == nil
+        self.deadlineSeconds = deadlineSeconds
+        configurationObserver = NotificationCenter.default.addObserver(forName: JevConnection.configurationChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.cooldown = .distantPast
+            self?.lastNotice = .distantPast
+            self?.reportedSuccess = false
+        }
+    }
+
+    deinit {
+        if let observer = configurationObserver { NotificationCenter.default.removeObserver(observer) }
+        timeout?.cancel()
+    }
 
     func submit(_ text: String, accepted: @escaping () -> Void) {
         guard pending.count < 8 else {
@@ -56,6 +74,10 @@ final class JevCommentGate {
             self.timeout?.cancel()
             self.active = nil
             let suppress = selectedMode == 2 && self.mode() == 2
+            if verdict != .unavailable && !self.reportedSuccess {
+                self.reportedSuccess = true
+                self.onLog?("✅ Jev判定が動作しています（詳細は設定 → Jev）")
+            }
             switch verdict {
             case .spam:
                 self.onLog?(suppress ? "🔇 Jev: スパム判定により読み上げ・YUiへの入力を抑制" : "🔎 Jev: スパム候補（観察モード）")
@@ -66,19 +88,24 @@ final class JevCommentGate {
                 self.context = Array((self.context + [String(text.prefix(200))]).suffix(3))
             case .unavailable:
                 self.cooldown = Date().addingTimeInterval(60)
-                self.notice("⚠️ Jev判定を利用できません。キー・接続を確認してください。60秒間は既存フィルタで処理します")
+                self.reportedSuccess = false
+                let detail = AppDefaults.suite.string(forKey: "GR_JevLastStatus") ?? "判定失敗"
+                self.notice("⚠️ Jev: \(detail)。60秒間は既存フィルタで処理します")
                 accepted()
             }
             self.pump()
         }
-        let deadline = DispatchWorkItem { finish(.unavailable) }
+        let deadline = DispatchWorkItem { [weak self] in
+            if self?.diagnosticsEnabled == true { JevConnection.publish("判定待ち時間超過。キーチェーン許可・接続を確認し、設定から接続テストしてください") }
+            finish(.unavailable)
+        }
         timeout = deadline
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: deadline)
+        DispatchQueue.main.asyncAfter(deadline: .now() + deadlineSeconds, execute: deadline)
         evaluate(text, context, finish)
     }
 
     static func makeRequest(text: String, context: [String], key: String) throws -> URLRequest {
-        var request = URLRequest(url: URL(string: "https://api.typesafe.ai/v1/systemone")!, timeoutInterval: 2)
+        var request = URLRequest(url: URL(string: "https://api.typesafe.ai/v1/systemone")!, timeoutInterval: 5)
         request.httpMethod = "POST"
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -114,19 +141,9 @@ final class JevCommentGate {
     }
 
     private static func request(text: String, context: [String], completion: @escaping (Verdict) -> Void) {
-        let started = Date()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let key = KeychainHelper.load(key: keychainKey) ?? ""
-            guard Date().timeIntervalSince(started) < 2, !key.isEmpty,
-                  let request = try? makeRequest(text: text, context: context, key: key) else {
-                DispatchQueue.main.async { completion(.unavailable) }
-                return
-            }
-            URLSession.shared.dataTask(with: request) { data, response, error in
-                let verdict: Verdict = error == nil && (response as? HTTPURLResponse)?.statusCode == 200
-                    ? data.map(parse) ?? .unavailable : .unavailable
-                DispatchQueue.main.async { completion(verdict) }
-            }.resume()
+        JevConnection.check(text: text, context: context) { verdict, detail in
+            JevConnection.publish(detail)
+            completion(verdict)
         }
     }
 }

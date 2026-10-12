@@ -3,6 +3,10 @@ import AppKit
 final class JevSettingsView: NSView {
     private let keyField = NSSecureTextField()
     private let modePopup = NSPopUpButton()
+    private let connectionStatus = NSTextField(wrappingLabelWithString: "まだ接続テストしていません")
+    private let testButton = NSButton(title: "保存して接続テスト", target: nil, action: nil)
+    private var statusObserver: NSObjectProtocol?
+    private var testGeneration = UUID()
     private let status = NSTextField(labelWithString: "キーの状態を確認中…")
 
     init() {
@@ -31,10 +35,19 @@ final class JevSettingsView: NSView {
         status.frame = NSRect(x: 20, y: 140, width: 440, height: 24)
         status.font = .systemFont(ofSize: 12)
         addSubview(status)
-        label("有効時はコメント本文と直近3件をTypeSafeへ送信します。名前・音声・経験ノートは送信しません。", 80)
-        label("日本語での判定精度は実運用で確認が必要です。接続失敗時は既存フィルタで処理を続けます。", 34)
+        testButton.target = self
+        testButton.action = #selector(testConnection)
+        testButton.bezelStyle = .rounded
+        testButton.frame = NSRect(x: 20, y: 105, width: 205, height: 30)
+        addSubview(testButton)
+        connectionStatus.frame = NSRect(x: 20, y: 50, width: 440, height: 52)
+        connectionStatus.font = .systemFont(ofSize: 12)
+        addSubview(connectionStatus)
+        refreshConnectionStatus()
+        statusObserver = NotificationCenter.default.addObserver(forName: JevConnection.statusChanged, object: nil, queue: .main) { [weak self] _ in self?.refreshConnectionStatus() }
+        label("有効時は本文と直近3件をTypeSafeへ送信。接続テストは固定の挨拶文を送信します。失敗時は既存フィルタを使います。", 3)
         let link = NSButton(title: "TypeSafeのAPIコンソール", target: self, action: #selector(openConsole))
-        link.frame = NSRect(x: 20, y: 1, width: 230, height: 30)
+        link.frame = NSRect(x: 230, y: 105, width: 225, height: 30)
         link.bezelStyle = .rounded
         addSubview(link)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -47,16 +60,56 @@ final class JevSettingsView: NSView {
 
     @objc private func modeChanged() {
         AppDefaults.suite.set(modePopup.indexOfSelectedItem, forKey: "GR_JevMode")
+        NotificationCenter.default.post(name: JevConnection.configurationChanged, object: nil)
     }
 
-    @objc private func saveKey() {
+    deinit {
+        if let observer = statusObserver { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    private func refreshConnectionStatus() {
+        connectionStatus.stringValue = AppDefaults.suite.string(forKey: "GR_JevLastStatus") ?? "接続未確認。キー保存だけではAPIの利用可否は分かりません。"
+    }
+
+    @objc private func saveKey() { persist(test: false) }
+    @objc private func testConnection() { persist(test: true) }
+
+    private func persist(test: Bool) {
         let key = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return }
+        guard !key.isEmpty else { if test { runConnectionTest() }; return }
         keyField.stringValue = ""
         status.stringValue = "保存中…"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let saved = KeychainHelper.save(key: JevCommentGate.keychainKey, value: key)
-            DispatchQueue.main.async { self?.status.stringValue = saved ? "APIキー保存済み" : "保存できませんでした。再入力してください" }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.status.stringValue = saved ? "APIキー保存済み" : "保存できませんでした。再入力してください"
+                if saved {
+                    NotificationCenter.default.post(name: JevConnection.configurationChanged, object: nil)
+                    if test { self.runConnectionTest() }
+                }
+            }
+        }
+    }
+
+    private func runConnectionTest() {
+        testButton.isEnabled = false
+        connectionStatus.stringValue = "固定の挨拶文で接続確認中…"
+        let generation = UUID()
+        testGeneration = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self = self, self.testGeneration == generation, !self.testButton.isEnabled else { return }
+            self.testGeneration = UUID()
+            self.testButton.isEnabled = true
+            self.connectionStatus.stringValue = "キー取得待ち。macOSのキーチェーン許可画面を確認し、再試行してください。"
+        }
+        JevConnection.check { [weak self] verdict, detail in
+            guard let self = self, self.testGeneration == generation else { return }
+            self.testButton.isEnabled = true
+            JevConnection.publish(detail)
+            if verdict != .unavailable {
+                NotificationCenter.default.post(name: JevConnection.configurationChanged, object: nil)
+            }
         }
     }
 
