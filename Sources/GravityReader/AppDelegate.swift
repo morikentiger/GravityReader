@@ -199,6 +199,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             if self.preferencesController == nil {
                 self.preferencesController = PreferencesWindowController()
+                self.preferencesController?.onFishAudioTest = { [weak self] in
+                    self?.captureManager?.speechManager.speak("こんにちは、ユイです。Fish Audioの音声をテストしています。Hello, this is a voice test.", withVoice: .fishAudio)
+                }
                 self.preferencesController?.onAPIKeyChanged = { [weak self] key in
                     self?.yuiManager?.setAPIKey(key)
                     self?.logWindowController?.addEntry("✅ APIキーを設定しました")
@@ -256,6 +259,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             self.captureManager?.speechManager.voiceMode = mode
             switch mode {
+            case .fishAudio:
+                self.logWindowController?.addEntry("🔊 デフォルト音声: Fish Audioに切り替えました")
             case .system:
                 self.logWindowController?.addEntry("🔊 デフォルト音声: システム音声に切り替えました")
             case .voicevox(let id):
@@ -285,6 +290,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             self.captureManager?.speechManager.setVoiceForUser(user, mode: mode)
             let label: String
             switch mode {
+            case .fishAudio: label = "Fish Audio"
             case .system: label = "システム音声"
             case .voicevox(let id):
                 let s = self.captureManager?.speechManager.cachedSpeakers.first(where: { $0.id == id })
@@ -329,6 +335,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private func speakAsYUi(_ text: String, likability: Int) {
         guard let sm = captureManager?.speechManager else { return }
 
+        if sm.voiceMode == .fishAudio { sm.speak(text); return }
         let speakers = sm.cachedSpeakers
         guard !speakers.isEmpty else {
             sm.speak(text)

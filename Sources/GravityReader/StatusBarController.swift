@@ -158,6 +158,10 @@ class StatusBarController {
         systemItem.target = self
         systemItem.tag = -1
         voiceSubmenu.addItem(systemItem)
+        let fishItem = NSMenuItem(title: "Fish Audio", action: #selector(selectFishAudio), keyEquivalent: "")
+        fishItem.target = self
+        fishItem.tag = -2
+        voiceSubmenu.addItem(fishItem)
         voiceSubmenu.addItem(.separator())
         let voicevoxHeader = NSMenuItem(title: "── VOICEVOX ──", action: nil, keyEquivalent: "")
         voicevoxHeader.isEnabled = false
@@ -461,6 +465,11 @@ class StatusBarController {
 
     // MARK: - Voice selection
 
+    @objc private func selectFishAudio() {
+        updateVoiceCheckmark(tag: -2)
+        onVoiceChanged?(.fishAudio)
+    }
+
     @objc private func selectSystemVoice() {
         updateVoiceCheckmark(tag: -1)
         onVoiceChanged?(.system)
@@ -474,7 +483,9 @@ class StatusBarController {
 
     private func updateVoiceCheckmark(tag: Int) {
         for item in voiceSubmenu.items {
-            if item.tag == -1 {
+            if item.tag == -2 {
+                item.state = tag == -2 ? .on : .off
+            } else if item.tag == -1 {
                 item.title = tag == -1 ? "✓ システム音声（デフォルト）" : "  システム音声（デフォルト）"
             } else if item.tag >= 0 {
                 let base = item.representedObject as? String ?? item.title
@@ -571,6 +582,11 @@ class StatusBarController {
         sysItem.target = self
         sysItem.representedObject = UserVoiceSelection(user: user, mode: .system)
         sub.addItem(sysItem)
+        let fishItem = NSMenuItem(title: "Fish Audio", action: #selector(selectUserVoice(_:)), keyEquivalent: "")
+        fishItem.target = self
+        fishItem.state = currentVoice == .fishAudio ? .on : .off
+        fishItem.representedObject = UserVoiceSelection(user: user, mode: .fishAudio)
+        sub.addItem(fishItem)
 
         sub.addItem(.separator())
 
@@ -590,6 +606,7 @@ class StatusBarController {
 
     private func voiceLabelFor(_ mode: VoiceMode) -> String {
         switch mode {
+        case .fishAudio: return "Fish Audio"
         case .system: return "システム"
         case .voicevox(let id):
             if let s = speakersCache.first(where: { $0.id == id }) {
@@ -615,6 +632,7 @@ class StatusBarController {
             if item.tag >= 0 { voiceSubmenu.removeItem(item) }
         }
 
+        updateVoiceCheckmark(tag: currentMode == .fishAudio ? -2 : currentMode == .system ? -1 : -3)
         if speakers.isEmpty {
             let noConn = NSMenuItem(title: "未接続（VOICEVOXを起動してください）", action: nil, keyEquivalent: "")
             noConn.isEnabled = false
@@ -628,7 +646,7 @@ class StatusBarController {
         }
 
         let currentTag: Int
-        if case .voicevox(let id) = currentMode { currentTag = id } else { currentTag = -1 }
+        if case .voicevox(let id) = currentMode { currentTag = id } else { currentTag = currentMode == .fishAudio ? -2 : -1 }
 
         for speaker in speakers {
             let label = "\(speaker.name)（\(speaker.style)）"

@@ -34,6 +34,11 @@ struct NotificationRule: Codable {
 class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
 
     // MARK: Callbacks – the owner (AppDelegate) can hook these to propagate changes
+    var onFishAudioTest: (() -> Void)?
+    private var fishKeyField: NSSecureTextField!
+    private var fishReferenceField: NSTextField!
+    private var fishModelPopup: NSPopUpButton!
+    private var fishStatusLabel: NSTextField!
     var onAPIKeyChanged: ((String) -> Void)?
     var onModelChanged: ((Bool) -> Void)?     // true = mini
     var onFrequencyChanged: ((YUiFrequency) -> Void)?
@@ -101,6 +106,7 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         tabView.addTabViewItem(makeAPITab())
         tabView.addTabViewItem(makeYUiTab())
         tabView.addTabViewItem(makeVoiceTab())
+        tabView.addTabViewItem(makeFishAudioTab())
         tabView.addTabViewItem(makeNotificationTab())
         tabView.addTabViewItem(makeDictionaryTab())
 
@@ -304,6 +310,73 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
 
         item.view = view
         return item
+    }
+
+    private func makeFishAudioTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "fishAudio")
+        item.label = "Fish Audio"
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 340))
+        view.addSubview(makeLabel("Fish Audio APIキー（OpenAIとは別）", frame: NSRect(x: 20, y: 302, width: 440, height: 22)))
+        fishKeyField = NSSecureTextField(frame: NSRect(x: 20, y: 269, width: 340, height: 24))
+        fishKeyField.placeholderString = "キーを入力して保存（空欄なら既存キーを維持）"
+        view.addSubview(fishKeyField)
+        let save = NSButton(title: "保存", target: self, action: #selector(saveFishSettings))
+        save.frame = NSRect(x: 370, y: 266, width: 80, height: 30)
+        save.bezelStyle = .rounded
+        view.addSubview(save)
+        fishStatusLabel = makeLabel("キーの保存状態を確認中…", frame: NSRect(x: 20, y: 240, width: 440, height: 22))
+        view.addSubview(fishStatusLabel)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let exists = !(KeychainHelper.load(key: FishAudioRequest.keychainKey) ?? "").isEmpty
+            DispatchQueue.main.async { self?.fishStatusLabel.stringValue = exists ? "APIキー保存済み" : "APIキー未設定" }
+        }
+        view.addSubview(makeLabel("声のID（reference_id・任意）", frame: NSRect(x: 20, y: 208, width: 440, height: 22)))
+        fishReferenceField = NSTextField(frame: NSRect(x: 20, y: 178, width: 430, height: 24))
+        fishReferenceField.stringValue = AppDefaults.suite.string(forKey: "GR_FishAudioReferenceID") ?? ""
+        fishReferenceField.placeholderString = "Fish Audioの声のID。空欄はサービス既定の声"
+        view.addSubview(fishReferenceField)
+        view.addSubview(makeLabel("モデル", frame: NSRect(x: 20, y: 140, width: 80, height: 22)))
+        fishModelPopup = NSPopUpButton(frame: NSRect(x: 100, y: 137, width: 350, height: 28), pullsDown: false)
+        fishModelPopup.addItems(withTitles: FishAudioRequest.models)
+        fishModelPopup.selectItem(withTitle: AppDefaults.suite.string(forKey: "GR_FishAudioModel") ?? FishAudioRequest.models[0])
+        view.addSubview(fishModelPopup)
+        let test = NSButton(title: "設定を保存して試聴", target: self, action: #selector(testFishAudio))
+        test.frame = NSRect(x: 20, y: 87, width: 200, height: 32)
+        test.bezelStyle = .rounded
+        view.addSubview(test)
+        let note = makeLabel("読み上げ音声メニューでFish Audioを選択すると有効になります。", frame: NSRect(x: 20, y: 51, width: 440, height: 24))
+        note.font = .systemFont(ofSize: 11)
+        view.addSubview(note)
+        let link = NSButton(title: "Fish Audioでキー・声を確認", target: self, action: #selector(openFishAudio))
+        link.frame = NSRect(x: 20, y: 15, width: 240, height: 28)
+        link.bezelStyle = .rounded
+        view.addSubview(link)
+        item.view = view
+        return item
+    }
+
+    @objc private func openFishAudio() {
+        NSWorkspace.shared.open(URL(string: "https://fish.audio/developers/")!)
+    }
+
+    @objc private func saveFishSettings() { persistFishSettings(test: false) }
+    @objc private func testFishAudio() { persistFishSettings(test: true) }
+
+    private func persistFishSettings(test: Bool) {
+        AppDefaults.suite.set(fishReferenceField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "GR_FishAudioReferenceID")
+        AppDefaults.suite.set(fishModelPopup.titleOfSelectedItem ?? FishAudioRequest.models[0], forKey: "GR_FishAudioModel")
+        let key = fishKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        fishKeyField.stringValue = ""
+        fishStatusLabel.stringValue = "保存中…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let saved = key.isEmpty || KeychainHelper.save(key: FishAudioRequest.keychainKey, value: key)
+            let configured = saved && !(KeychainHelper.load(key: FishAudioRequest.keychainKey) ?? "").isEmpty
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.fishStatusLabel.stringValue = !saved ? "APIキーを保存できませんでした。再入力してください" : configured ? "設定を保存しました" : "APIキーを入力してください"
+                if test && configured { self.onFishAudioTest?() }
+            }
+        }
     }
 
     private func makeNotificationTab() -> NSTabViewItem {

@@ -2,6 +2,7 @@ import AVFoundation
 import AppKit
 
 enum VoiceMode: Equatable {
+    case fishAudio
     case system          // macOS標準 AVSpeechSynthesizer
     case voicevox(Int)   // VOICEVOX speaker ID
 }
@@ -121,6 +122,7 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     /// ユーザーの声を解決（未割り当てなら自動でVOICEVOXから割り当て）
     private func resolveVoice(for user: String) -> VoiceMode {
+        if voiceMode == .fishAudio { return .fishAudio }
         // 完全一致
         if let mode = userVoiceMap[user] { return mode }
         // 部分一致
@@ -345,8 +347,9 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
             return
         }
         let prepared = TextPronunciation.prepare(text, romajiEnabled: AppDefaults.suite.object(forKey: "GR_RomajiReadingEnabled") as? Bool ?? true)
-        if prepared.language == "en-US" { speakWithSystem(prepared.text); return }
+        if prepared.language == "en-US", voice != .fishAudio { speakWithSystem(prepared.text); return }
         switch voice {
+        case .fishAudio: speakWithFishAudio(prepared.text)
         case .system: speakWithSystem(prepared.text)
         case .voicevox(let id): speakWithVoicevox(prepared.text, speaker: id)
         }
@@ -372,6 +375,43 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         markPlaybackStarted()
         activeUtterance = utterance
         synthesizer.speak(utterance)
+    }
+
+    private func speakWithFishAudio(_ text: String) {
+        let generation = speechGeneration
+        let reference = AppDefaults.suite.string(forKey: "GR_FishAudioReferenceID") ?? ""
+        let model = AppDefaults.suite.string(forKey: "GR_FishAudioModel") ?? FishAudioRequest.models[0]
+        // Keychain may prompt; never block the UI thread.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let key = KeychainHelper.load(key: FishAudioRequest.keychainKey) ?? ""
+            DispatchQueue.main.async {
+                guard let self = self, self.speechGeneration == generation, self.isPreparingSpeech else { return }
+                guard !key.isEmpty,
+                      let request = try? FishAudioRequest.make(text: text, apiKey: key, referenceID: reference, model: model) else {
+                    self.onLog?("⚠️ 設定 → Fish AudioでAPIキーを保存してください。システム音声を使用します")
+                    self.speakWithSystem(text)
+                    return
+                }
+                self.voicevoxTask = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                    DispatchQueue.main.async {
+                        guard let self = self, self.speechGeneration == generation, self.isPreparingSpeech else { return }
+                        let status = (response as? HTTPURLResponse)?.statusCode
+                        guard error == nil, status == 200, let data = data, !data.isEmpty else {
+                            self.onLog?("⚠️ Fish Audio: \(FishAudioRequest.failureMessage(status: status))。システム音声を使用します")
+                            self.speakWithSystem(text)
+                            return
+                        }
+                        guard (try? AVAudioPlayer(data: data)) != nil else {
+                            self.onLog?("⚠️ Fish Audioの音声を再生できません。システム音声を使用します")
+                            self.speakWithSystem(text)
+                            return
+                        }
+                        self.playWav(data)
+                    }
+                }
+                self.voicevoxTask?.resume()
+            }
+        }
     }
 
     private func speakWithVoicevox(_ text: String, speaker: Int) {
@@ -462,12 +502,14 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     private func voiceModeToString(_ mode: VoiceMode) -> String {
         switch mode {
+        case .fishAudio: return "fishAudio"
         case .system: return "system"
         case .voicevox(let id): return "voicevox:\(id)"
         }
     }
 
     private func stringToVoiceMode(_ s: String) -> VoiceMode {
+        if s == "fishAudio" { return .fishAudio }
         if s.hasPrefix("voicevox:"), let id = Int(s.replacingOccurrences(of: "voicevox:", with: "")) {
             return .voicevox(id)
         }
