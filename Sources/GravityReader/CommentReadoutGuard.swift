@@ -24,17 +24,7 @@ final class CommentReadoutGuard {
 
     static func hasRepeatedRun(_ text: String) -> Bool {
         if YUiSpamFilter.isRepetitiveSpam(text) { return true }
-        let characters = Array(text)
         // 文の途中や長い語の反復も検出する。通常の「うんうん」等は許容。
-        guard characters.count >= 4 else { return false }
-        for width in 1...min(20, characters.count / 4) {
-            for start in 0...(characters.count - width * 4) {
-                let unit = Array(characters[start..<(start + width)])
-                if (1..<4).allSatisfy({ repeatIndex in
-                    Array(characters[(start + width * repeatIndex)..<(start + width * (repeatIndex + 1))]) == unit
-                }) { return true }
-            }
-        }
-        return false
+        return PhoneticSpamGuard.containsRepetition(Array(text), minimumRepeats: 4, singleCharacterMinimum: 4)
     }
 }

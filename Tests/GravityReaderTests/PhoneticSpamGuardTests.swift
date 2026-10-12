@@ -7,6 +7,36 @@ final class PhoneticSpamGuardTests: XCTestCase {
         XCTAssertFalse(YUiSpamFilter.isRepetitiveSpam("あいうえおの発音を教えて"))
     }
 
+    func testLongSentenceRepetitionFromRoomIsSuppressed() {
+        let sentence = "やったーどれだけ長い音を繰り返しとみるんだろう"
+        let comment = String(repeating: sentence, count: 4)
+        XCTAssertGreaterThan(sentence.count, 20)
+        XCTAssertNotNil(CommentReadoutGuard().suppressionReason(comment, speaker: "viewer"))
+        XCTAssertTrue(YUiSpamFilter.isRepetitiveSpam("もりけん: " + comment))
+        XCTAssertNotNil(PhoneticSpamGuard.suppressionReason(original: comment, reading: comment))
+        XCTAssertNil(PhoneticSpamGuard.suppressionReason(original: sentence, reading: sentence))
+        XCTAssertNil(PhoneticSpamGuard.suppressionReason(original: sentence + sentence, reading: sentence + sentence))
+    }
+
+    func testRepetitionHasNoFixedPeriodLimit() {
+        // Distinct characters make this a genuinely long period, not a short
+        // repeating pattern hidden inside a long string.
+        let unit = String((0..<120).compactMap { UnicodeScalar(0x4E00 + $0).map(Character.init) })
+        let repeated = String(repeating: unit, count: 3)
+        XCTAssertNotNil(PhoneticSpamGuard.suppressionReason(original: repeated, reading: repeated))
+        XCTAssertNil(PhoneticSpamGuard.suppressionReason(original: unit, reading: unit))
+        let embedded = "前置き" + String(repeating: unit + "、", count: 4) + "終わり"
+        XCTAssertTrue(CommentReadoutGuard.hasRepeatedRun(embedded))
+        XCTAssertNotNil(PhoneticSpamGuard.suppressionReason(original: embedded, reading: embedded))
+    }
+
+    func testNearRepeatsDoNotCountAsIdenticalSentences() {
+        let text = "今日は公園で赤い花を見つけたので写真を撮りました。"
+            + "今日は公園で白い花を見つけたので写真を撮りました。"
+            + "今日は公園で黄色い花を見つけたので写真を撮りました。"
+        XCTAssertNil(CommentReadoutGuard().suppressionReason(text, speaker: "viewer"))
+    }
+
     func testMixedSpellingsCollapseToRepeatedSound() {
         XCTAssertNotNil(PhoneticSpamGuard.suppressionReason(original: "Mushi 虫 無視 ムシ", reading: "むし むし むし ムシ"))
         XCTAssertNotNil(PhoneticSpamGuard.suppressionReason(original: "25nicoにこniko", reading: "25にこにこにこ"))

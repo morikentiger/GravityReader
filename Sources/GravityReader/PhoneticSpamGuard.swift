@@ -13,22 +13,34 @@ enum PhoneticSpamGuard {
             .applyingTransform(StringTransform("Latin-Hiragana"), reverse: false) ?? reading
         let folded = kana.applyingTransform(.hiraganaToKatakana, reverse: true) ?? kana
         let chars = Array(folded.filter { $0.isLetter || $0.isNumber })
-        guard chars.count >= 6 else { return nil }
-        // Three repeated words dominate the utterance, even with a numeric prefix.
-        for width in 1...min(20, chars.count / 3) {
-            let minimum = width == 1 ? 6 : 3
-            guard width * minimum <= chars.count else { continue }
-            for start in 0...(chars.count - width * minimum) {
-                let unit = Array(chars[start..<start + width])
-                var count = 1
-                while start + (count + 1) * width <= chars.count,
-                      Array(chars[start + count * width..<start + (count + 1) * width]) == unit { count += 1 }
-                let numericPrefixWithRepeatedTail = original.first?.isNumber == true && width >= 2 && start + count * width == chars.count
-                if count >= minimum, Double(count * width) / Double(chars.count) >= 0.65 || numericPrefixWithRepeatedTail {
-                    return "読み方を揃えると同じ音が繰り返される"
+        if containsRepetition(chars, minimumRepeats: 3, singleCharacterMinimum: 6,
+                              minimumCoverage: 0.65, allowRepeatedTail: original.first?.isNumber == true) {
+            return "読み方を揃えると同じ音が繰り返される"
+        }
+        return nil
+    }
+
+    /// Compare characters one period apart. A matching run of two periods means
+    /// three adjacent copies. Scan every possible period without allocating slices
+    /// for every starting position: O(n²) time, O(1) additional space.
+    static func containsRepetition(_ characters: [Character], minimumRepeats: Int,
+                                   singleCharacterMinimum: Int, minimumCoverage: Double = 0,
+                                   allowRepeatedTail: Bool = false) -> Bool {
+        guard characters.count >= min(minimumRepeats, singleCharacterMinimum) else { return false }
+        for width in 1...max(1, characters.count / minimumRepeats) {
+            let minimum = width == 1 ? singleCharacterMinimum : minimumRepeats
+            guard width * minimum <= characters.count else { continue }
+            var matching = 0
+            for index in width..<characters.count {
+                matching = characters[index] == characters[index - width] ? matching + 1 : 0
+                guard matching >= width * (minimum - 1) else { continue }
+                let repeatedLength = (matching / width + 1) * width
+                if Double(repeatedLength) / Double(characters.count) >= minimumCoverage
+                    || (allowRepeatedTail && width >= 2 && index == characters.count - 1) {
+                    return true
                 }
             }
         }
-        return nil
+        return false
     }
 }
