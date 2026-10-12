@@ -117,4 +117,59 @@ final class YUiExperienceManagerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: archives[0]), before)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
+    func testTransfersConcreteCorrectionAcrossTopicsAndPersistsReference() {
+        let manager = manager()
+        manager.addExperience(.init(source: "A: Jevは何をする？", response: "Jevについて知りたい？", event: "会話", emotion: "不明", learning: "会話を深める", weight: 1))
+        let selected = manager.selectForReply(query: "B: 経験はどう活かす？")
+        XCTAssertEqual(selected.count, 1)
+        XCTAssertTrue(selected[0].lesson.contains("具体的な答え"))
+        manager.recordReferences(selected, query: "B: 経験はどう活かす？", response: "次の質問への返し方に使うよ。")
+        let loaded = self.manager().experienceCache[0]
+        XCTAssertEqual(loaded.referenceCount, 1)
+        XCTAssertEqual(loaded.lastReferenceResponse, "次の質問への返し方に使うよ。")
+        XCTAssertEqual(manager.experienceCache[0].learning, "会話を深める") // original record retained
+    }
+
+    func testNameAloneDoesNotSelectExperienceAndOwnLessonWins() {
+        let manager = manager()
+        manager.addExperience(.init(participants: ["長い名前"], source: "長い名前: 京都の旅行", event: "会話", emotion: "不明", learning: "旅行の質問では場所に沿って答える", weight: 1, reflectionVersion: 2))
+        manager.addExperience(.init(kind: .othersReport, source: "別人: 京都の旅行", event: "他人の旅行", emotion: "不明", learning: "他人の話", weight: 100))
+        XCTAssertTrue(manager.selectForReply(query: "長い名前: 天気予報").isEmpty)
+        XCTAssertEqual(manager.selectForReply(query: "B: 京都の旅行").first?.experience.kind, .ownConversation)
+    }
+
+    func testUnreviewedGeneralizationIsNotApplied() {
+        let manager = manager()
+        manager.addExperience(.init(source: "A: 花火きれい", response: "そうだね", event: "会話", emotion: "不明", learning: "共感すれば盛り上がる", weight: 1))
+        XCTAssertTrue(manager.selectForReply(query: "A: 花火きれい").isEmpty)
+    }
+
+    func testReferenceLinksToNewConversationAndItsReaction() {
+        let manager = manager()
+        manager.addExperience(.init(source: "A: なぜ？", response: "知りたい？", event: "会話", emotion: "不明", learning: "", weight: 1))
+        let selection = manager.selectForReply(query: "B: どうする？")
+        manager.generateExperience(userMessage: "B: どうする？", yuiResponse: "保存するよ。", apiClient: StubClient(apiKey: ""), referencedExperienceIDs: selection.map { $0.experience.id })
+        manager.observeReaction("B: ありがとう")
+        XCTAssertEqual(manager.experienceCache.last?.referencedExperienceIDs, [selection[0].experience.id])
+        XCTAssertEqual(manager.experienceCache.last?.reactions, ["B: ありがとう"])
+    }
+
+    func testReactionCanFollowAnotherPersonsInterveningConversation() {
+        let manager = manager()
+        manager.addExperience(.init(participants: ["A"], source: "A: 京都", event: "会話", emotion: "不明", learning: "", weight: 1))
+        manager.addExperience(.init(participants: ["B"], source: "B: 東京", event: "会話", emotion: "不明", learning: "", weight: 1))
+        manager.observeReaction("A: それは違う")
+        XCTAssertEqual(manager.experienceCache[0].reactions.count, 1)
+        XCTAssertTrue(manager.experienceCache[1].reactions.isEmpty)
+    }
+
+    func testApplicationContextIsBoundedAndLessonComesBeforeEvidence() {
+        let manager = manager()
+        manager.addExperience(.init(source: "A: なぜ？" + String(repeating: "長い", count: 2000), response: "知りたい？", event: "会話", emotion: "不明", learning: "", weight: 1))
+        let context = manager.applicationContext(manager.selectForReply(query: "B: どうする？"))
+        XCTAssertLessThan(context.utf8.count, 2000)
+        XCTAssertTrue(context.contains("具体的な答え"))
+        XCTAssertFalse(context.contains("成功した"))
+    }
+
 }

@@ -54,11 +54,20 @@ final class ExperienceWindowController: NSWindowController {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
-        textView.string = experiences.reversed().map { experience in
+        let referenced = experiences.filter { ($0.referenceCount ?? 0) > 0 }
+        let recentReferences = referenced.sorted { ($0.lastReferencedAt ?? 0) > ($1.lastReferencedAt ?? 0) }.prefix(5)
+        let applications = recentReferences.map { experience in
+            let followup = experiences.last { ($0.referencedExperienceIDs ?? []).contains(experience.id) && $0.response == experience.lastReferenceResponse }
+            let reactions = followup?.reactions ?? []
+            let review = followup.flatMap { $0.reflectedAt == nil ? nil : $0.learning } ?? "次の会話経験の振り返り待ち（効果未確認）"
+            return "#\(experience.id.uuidString.prefix(8)) 参照理由: \(experience.lastReferenceReason ?? "")\n試した方針: \(experience.lastAppliedLesson ?? "")\n質問: \(experience.lastReferenceQuery ?? "")\n生成した返答: \(experience.lastReferenceResponse ?? "")\nその後の発言: \(reactions.isEmpty ? "未観測" : reactions.joined(separator: " / "))\n返答後の振り返り: \(review)\n※参照回数は成功回数ではありません。"
+        }.joined(separator: "\n\n")
+        let overview = "返答への活用\n\(referenced.count)件の経験を累計\(experiences.reduce(0) { $0 + ($1.referenceCount ?? 0) })回参照\n現在の質問に合う学びを最大2件、返答生成時に渡します。モデル本体の再学習ではありません。\n\n" + (applications.isEmpty ? "この版での参照記録はまだありません。次の返答から記録します。" : applications) + "\n\n──────── 経験の記録 ────────\n\n"
+        textView.string = overview + experiences.reversed().map { experience in
             let date = experience.timestamp.map { formatter.string(from: Date(timeIntervalSince1970: $0)) } ?? "日時不明"
             let kind = experience.kind == .ownConversation ? "自身の会話経験" : "他人から聞いた体験"
             let lesson = experience.learning.isEmpty ? "振り返り前（効果未確認）" : experience.learning
-            return "\(date)　[\(kind)]\n出来事: \(experience.event)\n会話の根拠: \(experience.source)\n次の発言: \(experience.reactions.isEmpty ? "未観測" : experience.reactions.joined(separator: " / "))\n感情の根拠: \(experience.emotion)\n振り返り状態: \(experience.reflectionStatus ?? (experience.learning.isEmpty ? "待機中" : "記録済み"))\n次回への学び: \(lesson)"
+            return "\(date)　[\(kind)] #\(experience.id.uuidString.prefix(8))\n返答生成への参照: \(experience.referenceCount ?? 0)回\n出来事: \(experience.event)\n会話の根拠: \(experience.source)\n次の発言: \(experience.reactions.isEmpty ? "未観測" : experience.reactions.joined(separator: " / "))\n感情の根拠: \(experience.emotion)\n振り返り状態: \(experience.reflectionStatus ?? (experience.learning.isEmpty ? "待機中" : "記録済み"))\n次回への学び: \(lesson)"
         }.joined(separator: "\n\n────────────────────\n\n")
         if experiences.isEmpty { textView.string = "経験はまだありません。会話から経験が追加されると、ここに表示されます。" }
         window?.title = "YUiの経験（\(experiences.count)件）"

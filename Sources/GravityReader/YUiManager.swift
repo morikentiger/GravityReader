@@ -564,7 +564,9 @@ class YUiManager {
         let moodLabel = ["", "😏 ちょっと寂しい", "😤 すねてる", "🥺 甘えモード"][min(loneliness, 3)]
         onLog?("💭 YUi 話題を考え中...\(loneliness > 0 ? "（\(moodLabel) Lv.\(loneliness)）" : "")")
 
-        let context = buildIdleContext()
+        let experienceQuery = memoryManager.conversationMemory.suffix(3).map { $0.text }.joined(separator: "\n")
+        let selectedExperiences = experienceManager.selectForReply(query: experienceQuery)
+        let context = experienceManager.applicationContext(selectedExperiences) + "\n" + buildIdleContext()
 
         let lonelinessInstruction: String
         switch loneliness {
@@ -628,6 +630,7 @@ class YUiManager {
                 self.consecutiveYUiMessages += 1
                 let loneEmoji = ["😊", "😏", "😤", "🥺", "😴"][min(self.lonelinessLevel, 4)]
                 if self.lonelinessEnabled { self.onLog?("\(loneEmoji) すねレベル: \(self.lonelinessLevel)") }
+                self.experienceManager.recordReferences(selectedExperiences, query: experienceQuery, response: response)
                 self.onResponse?(response, nil, 50)
                 self.lastIdleResponseTime = Date()
                 self.resetIdleTimer()
@@ -657,11 +660,6 @@ class YUiManager {
             parts.append("【直近の会話】\n\(recent.joined(separator: "\n"))")
         }
 
-        let expQuery = recent.joined(separator: " ")
-        let relevantExperiences = experienceManager.findRelevantExperiences(query: expQuery, topK: 1)
-        if !relevantExperiences.isEmpty {
-            parts.append(experienceManager.context(for: relevantExperiences))
-        }
 
         return parts.joined(separator: "\n\n")
     }
@@ -702,7 +700,9 @@ class YUiManager {
 
         // 過去の保存文脈にあるミュート対象も応答材料から除外する。
         memoryManager.conversationMemory.removeAll { YUiSpamFilter.isIgnoredMessage($0.text) || $0.text.hasSuffix("[不適切]") }
-        let context = buildContext(newMessages: newMessages)
+        let experienceQuery = newMessages.suffix(3).joined(separator: "\n")
+        let selectedExperiences = experienceManager.selectForReply(query: experienceQuery)
+        let context = buildContext(newMessages: newMessages, selectedExperiences: selectedExperiences)
 
         onLog?("💭 YUi 考え中...")
 
@@ -718,6 +718,7 @@ class YUiManager {
             guard !shortSentence.isEmpty else { return }
             if YUiSpamFilter.isTooSimilarToPast(shortSentence, history: self.memoryManager.myResponseHistory) { return }
             spokenText = shortSentence
+            self.experienceManager.recordReferences(selectedExperiences, query: experienceQuery, response: shortSentence)
             let score = primaryUser.map { self.getLikability(for: $0) } ?? 50
             self.onResponse?(shortSentence, primaryUser, score)
         }, onComplete: { [weak self] fullText in
@@ -747,17 +748,18 @@ class YUiManager {
             if self.lonelinessEnabled { self.onLog?("\(loneEmoji) すねレベル: \(self.lonelinessLevel)") }
 
             let userMsg = newMessages.joined(separator: "\n")
-            self.experienceManager.generateExperience(userMessage: userMsg, yuiResponse: fullText, apiClient: self.apiClient)
+            self.experienceManager.generateExperience(userMessage: userMsg, yuiResponse: fullText, apiClient: self.apiClient, referencedExperienceIDs: selectedExperiences.map { $0.experience.id })
         })
     }
 
     /// 文脈を構築
-    private func buildContext(newMessages: [String]) -> String {
+    private func buildContext(newMessages: [String], selectedExperiences: [YUiExperienceManager.Selection]) -> String {
         var parts: [String] = []
 
         if let latest = newMessages.last {
-            parts.append("【今答える対象（最優先）】\n\(latest)")
+            parts.append("【今答える対象（最優先）】\n\(YUiConversationContext.clipped(latest, bytes: 1200))")
         }
+        parts.append(experienceManager.applicationContext(selectedExperiences))
         if let previous = memoryManager.conversationMemory.last(where: { $0.text.hasPrefix("YUi: ") }) {
             parts.append("【直前に自分が返した内容】\n\(previous.text)")
         }
@@ -814,13 +816,6 @@ class YUiManager {
         }
         if !relevantMemories.isEmpty {
             parts.append("【ユーザーの記憶（前回までの印象）】\n\(relevantMemories.prefix(3).joined(separator: "\n"))")
-        }
-
-        // YUiの経験
-        let expQuery = newMessages.suffix(3).joined(separator: " ")
-        let relevantExperiences = experienceManager.findRelevantExperiences(query: expQuery, topK: 1)
-        if !relevantExperiences.isEmpty {
-            parts.append(experienceManager.context(for: relevantExperiences))
         }
 
         if !memoryManager.memorySummary.isEmpty {
