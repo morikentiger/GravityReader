@@ -21,6 +21,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         captureManager?.logWindow = logWindowController
 
         yuiManager = YUiManager()
+        if let client = yuiManager?.apiClient { captureManager?.speechManager.readingNormalizer = TTSReadingNormalizer(apiClient: client) }
+        captureManager?.speechManager.isHumanSpeakingChecker = { [weak self] in self?.roomTranscription?.isSomeoneSpeaking ?? false }
         yuiManager?.experienceManager.onExperiencesChanged = { [weak self] in
             guard let self = self else { return }
             self.experienceWindowController?.refresh(self.yuiManager?.experienceManager.experienceCache ?? [])
@@ -74,9 +76,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // TTS読み上げ中 or 声紋登録中 → YUiは全部黙る
         yuiManager?.isSpeakingChecker = { [weak self] in
-            let ttsSpeaking = self?.captureManager?.speechManager.isSpeaking ?? false
+            let ttsSpeaking = (self?.captureManager?.speechManager.isSpeaking ?? false) || (self?.captureManager?.speechManager.isPreparingSpeech ?? false)
             let enrolling = self?.roomTranscription?.isEnrolling ?? false
             return ttsSpeaking || enrolling
+        }
+
+        yuiManager?.isHumanSpeakingChecker = { [weak self] in
+            self?.roomTranscription?.isSomeoneSpeaking ?? false
         }
 
         // TTS再生状態をRoomTranscriptionに伝える（自分の声を拾わない）
@@ -365,7 +371,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         func check() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 guard self != nil else { return }
-                if sm.isSpeaking {
+                if sm.isSpeaking || sm.isPreparingSpeech || sm.hasQueuedSpeech {
                     check()  // まだ喋ってる → 再チェック
                 } else {
                     // 喋り終わった → 少し待ってからコールバック（残響除去）

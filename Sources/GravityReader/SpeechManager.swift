@@ -15,6 +15,13 @@ struct VoicevoxSpeaker {
 class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
     private var audioPlayer: AVAudioPlayer?
+    private var activeUtterance: AVSpeechUtterance?
+    private var voicevoxTask: URLSessionDataTask?
+    private var speechGeneration = UUID()
+    var readingNormalizer: TTSReadingNormalizer?
+    var isHumanSpeakingChecker: (() -> Bool)?
+    private(set) var isPreparingSpeech = false
+    var hasQueuedSpeech: Bool { !queue.isEmpty }
     private var nextSpeechWork: DispatchWorkItem?
     private var nextSpeechDate = Date.distantPast
     private var speechBurstStarted: Date?
@@ -170,6 +177,11 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     func stop() {
+        speechGeneration = UUID()
+        isPreparingSpeech = false
+        voicevoxTask?.cancel()
+        voicevoxTask = nil
+        activeUtterance = nil
         nextSpeechWork?.cancel()
         nextSpeechWork = nil
         nextSpeechDate = .distantPast
@@ -303,7 +315,7 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     // MARK: - Private
 
     private func speakNext() {
-        guard !isSpeaking, !queue.isEmpty else { return }
+        guard !isSpeaking, !isPreparingSpeech, !queue.isEmpty else { return }
         let wait = nextSpeechDate.timeIntervalSinceNow
         if wait > 0 {
             nextSpeechWork?.cancel()
@@ -312,74 +324,118 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
             return
         }
-        if speechBurstStarted == nil { speechBurstStarted = Date() }
+        speechGeneration = UUID()
+        let generation = speechGeneration
         let item = queue.removeFirst()
-        isSpeaking = true
-        onSpeakingStateChanged?(true)
+        isPreparingSpeech = true
+        let ready: (String) -> Void = { [weak self] text in
+            guard let self = self, self.speechGeneration == generation, self.isPreparingSpeech else { return }
+            self.startPreparedSpeech(text, voice: item.voice, generation: generation)
+        }
+        if let normalizer = readingNormalizer { normalizer.normalize(item.text, completion: ready) }
+        else { ready(item.text) }
+    }
 
-        switch item.voice {
-        case .system:
-            speakWithSystem(item.text)
-        case .voicevox(let speakerID):
-            speakWithVoicevox(item.text, speaker: speakerID)
+    private func startPreparedSpeech(_ text: String, voice: VoiceMode, generation: UUID) {
+        guard speechGeneration == generation, isPreparingSpeech else { return }
+        if isHumanSpeakingChecker?() == true {
+            let work = DispatchWorkItem { [weak self] in self?.startPreparedSpeech(text, voice: voice, generation: generation) }
+            nextSpeechWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+            return
+        }
+        let prepared = TextPronunciation.prepare(text, romajiEnabled: AppDefaults.suite.object(forKey: "GR_RomajiReadingEnabled") as? Bool ?? true)
+        if prepared.language == "en-US" { speakWithSystem(prepared.text); return }
+        switch voice {
+        case .system: speakWithSystem(prepared.text)
+        case .voicevox(let id): speakWithVoicevox(prepared.text, speaker: id)
         }
     }
 
+    private func markPlaybackStarted() {
+        isPreparingSpeech = false
+        if speechBurstStarted == nil { speechBurstStarted = Date() }
+        isSpeaking = true
+        onSpeakingStateChanged?(true)
+    }
+
     private func speakWithSystem(_ text: String) {
-        let processed = applyReadingDictionary(text)
+        if deferForHumanSpeech({ [weak self] in self?.speakWithSystem(text) }) { return }
+        let prepared = TextPronunciation.prepare(text, romajiEnabled: AppDefaults.suite.object(forKey: "GR_RomajiReadingEnabled") as? Bool ?? true)
+        let processed = prepared.language == "ja-JP" ? applyReadingDictionary(prepared.text) : prepared.text
         let utterance = AVSpeechUtterance(string: processed)
-        utterance.voice = AVSpeechSynthesisVoice(language: "ja-JP")
-        utterance.rate = 0.52
+        utterance.voice = AVSpeechSynthesisVoice(language: prepared.language)
+        let savedRate = AppDefaults.suite.float(forKey: "GR_SpeechRate")
+        utterance.rate = savedRate > 0 ? min(0.7, max(0.3, savedRate)) : 0.52
         utterance.pitchMultiplier = 1.0
         utterance.volume = 1.0
+        markPlaybackStarted()
+        activeUtterance = utterance
         synthesizer.speak(utterance)
     }
 
     private func speakWithVoicevox(_ text: String, speaker: Int) {
-        let processed = applyReadingDictionary(text)
-        let encodedText = processed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? processed
-        guard let queryURL = URL(string: "\(voicevoxBaseURL)/audio_query?text=\(encodedText)&speaker=\(speaker)") else {
-            finishCurrentAndNext()
+        let generation = speechGeneration
+        guard var components = URLComponents(string: "\(voicevoxBaseURL)/audio_query") else {
+            speakWithSystem(text)
             return
         }
-        var queryReq = URLRequest(url: queryURL)
-        queryReq.httpMethod = "POST"
-
-        URLSession.shared.dataTask(with: queryReq) { [weak self] data, _, error in
-            guard let self = self, let queryData = data, error == nil else {
-                DispatchQueue.main.async {
-                    self?.onLog?("⚠️ VOICEVOX接続エラー — エンジンが起動しているか確認してください")
-                    self?.speakWithSystem(text)
-                }
-                return
-            }
-
-            guard let synthURL = URL(string: "\(self.voicevoxBaseURL)/synthesis?speaker=\(speaker)") else {
-                DispatchQueue.main.async { self.finishCurrentAndNext() }
-                return
-            }
-            var synthReq = URLRequest(url: synthURL)
-            synthReq.httpMethod = "POST"
-            synthReq.addValue("application/json", forHTTPHeaderField: "Content-Type")
-            synthReq.httpBody = queryData
-
-            URLSession.shared.dataTask(with: synthReq) { [weak self] wavData, _, error in
-                guard let self = self, let wavData = wavData, error == nil else {
-                    DispatchQueue.main.async { self?.finishCurrentAndNext() }
+        components.queryItems = [URLQueryItem(name: "text", value: applyReadingDictionary(text)),
+                                 URLQueryItem(name: "speaker", value: String(speaker))]
+        guard let queryURL = components.url else { speakWithSystem(text); return }
+        var queryRequest = URLRequest(url: queryURL, timeoutInterval: 10)
+        queryRequest.httpMethod = "POST"
+        voicevoxTask = URLSession.shared.dataTask(with: queryRequest) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self, self.speechGeneration == generation, self.isPreparingSpeech else { return }
+                guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200, let queryData = data else {
+                    self.onLog?("⚠️ VOICEVOXに接続できないためシステム音声を使用")
+                    self.speakWithSystem(text)
                     return
                 }
-                DispatchQueue.main.async {
-                    self.playWav(wavData)
+                guard let url = URL(string: "\(self.voicevoxBaseURL)/synthesis?speaker=\(speaker)") else {
+                    self.speakWithSystem(text)
+                    return
                 }
-            }.resume()
-        }.resume()
+                var request = URLRequest(url: url, timeoutInterval: 30)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = queryData
+                self.voicevoxTask = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                    DispatchQueue.main.async {
+                        guard let self = self, self.speechGeneration == generation, self.isPreparingSpeech else { return }
+                        guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200, let data = data else {
+                            self.speakWithSystem(text)
+                            return
+                        }
+                        self.playWav(data)
+                    }
+                }
+                self.voicevoxTask?.resume()
+            }
+        }
+        voicevoxTask?.resume()
+    }
+
+    private func deferForHumanSpeech(_ action: @escaping () -> Void) -> Bool {
+        guard isHumanSpeakingChecker?() == true else { return false }
+        let generation = speechGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.speechGeneration == generation, self.isPreparingSpeech else { return }
+            action()
+        }
+        nextSpeechWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+        return true
     }
 
     private func playWav(_ data: Data) {
+        if deferForHumanSpeech({ [weak self] in self?.playWav(data) }) { return }
         do {
             audioPlayer = try AVAudioPlayer(data: data)
             audioPlayer?.delegate = self
-            audioPlayer?.play()
+            markPlaybackStarted()
+            if audioPlayer?.play() != true { finishCurrentAndNext() }
         } catch {
             NSLog("[SpeechManager] WAV playback error: \(error)")
             finishCurrentAndNext()
@@ -387,6 +443,10 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     private func finishCurrentAndNext() {
+        isPreparingSpeech = false
+        activeUtterance = nil
+        voicevoxTask = nil
+        audioPlayer = nil
         let needsRest = speechBurstStarted.map { Date().timeIntervalSince($0) >= 20 } ?? false
         nextSpeechDate = Date().addingTimeInterval(needsRest ? 5 : 1.2)
         if needsRest {
@@ -417,10 +477,13 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     // MARK: - AVSpeechSynthesizerDelegate
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        guard utterance === activeUtterance else { return }
         finishCurrentAndNext()
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        guard utterance === activeUtterance else { return }
+        activeUtterance = nil
         isSpeaking = false
         onSpeakingStateChanged?(false)
     }
@@ -430,6 +493,7 @@ class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
 extension SpeechManager: AVAudioPlayerDelegate {
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        guard player === audioPlayer else { return }
         finishCurrentAndNext()
     }
 }

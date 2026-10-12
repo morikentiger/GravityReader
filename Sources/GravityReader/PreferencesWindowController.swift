@@ -45,6 +45,9 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
 
     // API tab
     private var apiKeyField: NSSecureTextField!
+    private var recognitionLanguagePopup: NSPopUpButton!
+    private var romajiToggle: NSButton!
+    private var llmReadingToggle: NSButton!
     private var keyStatusGeneration = 0
     private var apiKeyStatusLabel: NSTextField!
     private var modelGPT4oButton: NSButton!
@@ -235,6 +238,23 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
         item.label = "音声設定"
 
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 340))
+
+        let languageLabel = makeLabel("音声認識の言語:", frame: NSRect(x: 20, y: 145, width: 140, height: 20))
+        view.addSubview(languageLabel)
+        recognitionLanguagePopup = NSPopUpButton(frame: NSRect(x: 160, y: 141, width: 180, height: 26), pullsDown: false)
+        recognitionLanguagePopup.addItems(withTitles: ["日本語", "English"])
+        recognitionLanguagePopup.selectItem(at: AppDefaults.suite.string(forKey: "GR_RecognitionLanguage") == "en-US" ? 1 : 0)
+        recognitionLanguagePopup.target = self
+        recognitionLanguagePopup.action = #selector(recognitionLanguageChanged(_:))
+        view.addSubview(recognitionLanguagePopup)
+        romajiToggle = NSButton(checkboxWithTitle: "日本語のローマ字をかな読みする", target: self, action: #selector(romajiReadingChanged(_:)))
+        romajiToggle.frame = NSRect(x: 20, y: 100, width: 430, height: 24)
+        romajiToggle.state = (AppDefaults.suite.object(forKey: "GR_RomajiReadingEnabled") as? Bool ?? true) ? .on : .off
+        view.addSubview(romajiToggle)
+        llmReadingToggle = NSButton(checkboxWithTitle: "LLMでTTS向けの読み方を標準化する", target: self, action: #selector(llmReadingChanged(_:)))
+        llmReadingToggle.frame = NSRect(x: 20, y: 60, width: 430, height: 24)
+        llmReadingToggle.state = (AppDefaults.suite.object(forKey: "GR_LLMReadingEnabled") as? Bool ?? true) ? .on : .off
+        view.addSubview(llmReadingToggle)
 
         // --- デフォルト音声 info ---
         let voiceInfo = makeLabel("デフォルト音声はメニューバーから変更してください。", frame: NSRect(x: 20, y: 280, width: 440, height: 20))
@@ -482,6 +502,18 @@ class PreferencesWindowController: NSWindowController, NSTabViewDelegate {
     }
 
     // MARK: - Actions: Voice Tab
+
+    @objc private func recognitionLanguageChanged(_ sender: NSPopUpButton) {
+        AppDefaults.suite.set(sender.indexOfSelectedItem == 1 ? "en-US" : "ja-JP", forKey: "GR_RecognitionLanguage")
+    }
+
+    @objc private func llmReadingChanged(_ sender: NSButton) {
+        AppDefaults.suite.set(sender.state == .on, forKey: "GR_LLMReadingEnabled")
+    }
+
+    @objc private func romajiReadingChanged(_ sender: NSButton) {
+        AppDefaults.suite.set(sender.state == .on, forKey: "GR_RomajiReadingEnabled")
+    }
 
     @objc private func voicevoxURLChanged(_ sender: NSTextField) {
         let url = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)

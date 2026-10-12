@@ -15,7 +15,7 @@ final class YUiExperienceManagerTests: XCTestCase {
     }
     private final class StubClient: YUiAPIClient {
         var calls = 0
-        override func callRaw(systemPrompt: String, userMessage: String, completion: @escaping (String?) -> Void) {
+        override func callJSON(systemPrompt: String, userMessage: String, completion: @escaping (String?) -> Void) {
             calls += 1
             completion(nil)
         }
@@ -85,19 +85,36 @@ final class YUiExperienceManagerTests: XCTestCase {
         XCTAssertTrue(manager.findRelevantExperiences(query: "あ").isEmpty)
     }
 
-    func testReflectionBatchesAndDoesNotImmediatelyRetry() {
+    func testReflectionRunsWithoutFiveRecordsAndAvoidsImmediateRetry() {
         let manager = manager()
         let client = StubClient(apiKey: "test-placeholder")
-        for _ in 0..<4 { manager.generateExperience(userMessage: "A: 京都に行った", yuiResponse: "いいね。", apiClient: client) }
-        XCTAssertEqual(client.calls, 0)
         manager.generateExperience(userMessage: "A: 京都に行った", yuiResponse: "いいね。", apiClient: client)
+        XCTAssertEqual(client.calls, 0)
+        XCTAssertFalse(manager.experienceCache[0].learning.isEmpty)
+        let now = Date().addingTimeInterval(31)
+        manager.reflectIfNeeded(apiClient: client, now: now)
         XCTAssertEqual(client.calls, 1)
         let done = expectation(description: "callback")
         DispatchQueue.main.async {
-            manager.generateExperience(userMessage: "A: 京都に行った", yuiResponse: "いいね。", apiClient: client)
+            XCTAssertTrue(manager.experienceCache[0].reflectionStatus!.contains("失敗"))
+            manager.reflectIfNeeded(apiClient: client, now: now.addingTimeInterval(1))
             XCTAssertEqual(client.calls, 1)
             done.fulfill()
         }
         wait(for: [done], timeout: 2)
+    }
+
+    func testQueuedResetArchivesLastSavedDataOnNextLoad() throws {
+        let current = manager()
+        current.addExperience(.init(source: "A: 京都へ", event: "会話", emotion: "未評価", learning: "", weight: 1))
+        let marker = directory.appendingPathComponent("experience_reset_requested.json")
+        try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString]).write(to: marker)
+        current.addExperience(.init(source: "B: またね", event: "その後の会話", emotion: "未評価", learning: "", weight: 1))
+        let before = try Data(contentsOf: directory.appendingPathComponent("yui_experiences_v2.json"))
+        XCTAssertTrue(manager().experienceCache.isEmpty)
+        let archives = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("archives"), includingPropertiesForKeys: nil)
+        XCTAssertEqual(archives.count, 1)
+        XCTAssertEqual(try Data(contentsOf: archives[0]), before)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 }

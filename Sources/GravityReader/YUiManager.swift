@@ -51,7 +51,7 @@ class YUiManager {
 
     /// 相手の発言量に応じた応答長ガイド
     private var responseLengthGuide: String {
-        "必ず1文、10〜40文字で返す。一番伝えたいことだけを言い、話題を足さない。"
+        "必ず短い1文で返す。日本語は10〜40文字、英語は15語以内。一番伝えたいことだけを言い、話題を足さない。"
     }
 
     // MARK: - すねる・甘えるシステム
@@ -188,6 +188,7 @@ class YUiManager {
 
     /// 読み上げ中かどうかを外部から注入
     var isSpeakingChecker: (() -> Bool)?
+    var isHumanSpeakingChecker: (() -> Bool)?
 
     // MARK: - 相槌
 
@@ -215,9 +216,10 @@ class YUiManager {
 
     private let systemPrompt = """
         あなたは音声ルームのAIパートナーYUi（ゆい）。落ち着いて優しく、友達のような柔らかいタメ口で話す。オーナーはもりけん。
-        必ず1文、10〜40文字で、最新の発言への答えを返す。絵文字や長い前置きは不要。
+        必ず短い1文で、最新の発言への答えを返す。日本語は10〜40文字、英語は15語以内。絵文字や長い前置きは不要。
         話者と時系列を追い、自分の直前の返答も踏まえる。「それ」「さっき」は直前の話題に照らす。
         質問・訂正への返答を優先し、一般的な相槌だけで済ませない。
+        英語の問いには英語、日本語や日本語のローマ字表記には日本語で返す。利用者が言語を指定したらそれを優先する。
         文学の引用の続きを問われたら、続きと作品名を答える。例:「春はあけぼの、夏は？」には「『枕草子』なら、夏は夜だね。」。知識が曖昧なら創作せず不明と伝える。参照先が不明なら短く確認する。
         話題を勝手に変えず、質問攻めや同じ相槌の繰り返しを避ける。会話が盛り上がっているときは聞き役になる。
         自身の経験は実際の会話行為だけ。他人の体験を自分の人生として語らない。
@@ -261,8 +263,9 @@ class YUiManager {
         }
         memoryManager.loadLikability()
         memoryManager.loadUserMemory()
-        memoryManager.loadMemory()
         experienceManager.loadExperiences()
+        memoryManager.loadMemory()
+        experienceManager.startReflectionTimer(apiClient: apiClient)
 
         memoryManager.startCompressionTimer(hasAPIKey: hasAPIKey, apiClient: apiClient)
     }
@@ -364,7 +367,7 @@ class YUiManager {
         if text.hasPrefix("もりけん:") || text.hasPrefix("もりけん：") { return }
         if text.hasSuffix("[不適切]") { return }
         if isAizuchiInFlight || responseInFlight || Date() < listenUntil { return }
-        if isSpeakingChecker?() == true { return }
+        if isSpeakingChecker?() == true || isHumanSpeakingChecker?() == true { return }
 
         messagesSinceLastAizuchi += 1
 
@@ -398,7 +401,7 @@ class YUiManager {
                 if let aizuchi = response?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !aizuchi.isEmpty {
                     let clean = aizuchi.count > 15 ? String(aizuchi.prefix(15)) : aizuchi
-                    guard !self.responseInFlight, Date() >= self.listenUntil, self.isSpeakingChecker?() != true else { return }
+                    guard !self.responseInFlight, Date() >= self.listenUntil, self.isSpeakingChecker?() != true, self.isHumanSpeakingChecker?() != true else { return }
                     self.lastAizuchi = clean
                     self.onAizuchi?(clean)
                 }
@@ -420,6 +423,9 @@ class YUiManager {
         } else {
             messageContent = text
         }
+
+        // 音声の短い断片は相槌・応答・経験・人物評価のいずれにも渡さない。
+        if !isComment && !VoiceInputPolicy.isActionable(messageContent) { return }
 
         let spamLevel = YUiSpamFilter.detectSpamLevel(messageContent)
         let speaker = text.range(of: ": ").map { String(text[..<$0.lowerBound]) }
@@ -527,7 +533,7 @@ class YUiManager {
             resetIdleTimer()
             return
         }
-        if isSpeakingChecker?() == true {
+        if isSpeakingChecker?() == true || isHumanSpeakingChecker?() == true {
             DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
                 self?.onIdleFired()
             }
@@ -669,7 +675,7 @@ class YUiManager {
             return
         }
 
-        if responseInFlight || isSpeakingChecker?() == true || Date() < listenUntil {
+        if responseInFlight || isSpeakingChecker?() == true || isHumanSpeakingChecker?() == true || Date() < listenUntil {
             let work = DispatchWorkItem { [weak self] in
                 self?.onTimerFired()
             }
@@ -678,12 +684,14 @@ class YUiManager {
             return
         }
 
+        messageBuffer.removeAll { Date().timeIntervalSince($0.timestamp) > 120 }
+        guard !messageBuffer.isEmpty else { return }
         let newMessages = messageBuffer.map { $0.text }
         messageBuffer.removeAll()
 
         let primaryUser = memoryManager.detectPrimaryUser(from: newMessages)
 
-        let topicSummary = newMessages.map { msg in
+        let topicSummary = newMessages.suffix(3).map { msg in
             if let r = msg.range(of: ": ") ?? msg.range(of: "： ") {
                 return String(msg[r.upperBound...])
             }
@@ -747,6 +755,12 @@ class YUiManager {
     private func buildContext(newMessages: [String]) -> String {
         var parts: [String] = []
 
+        if let latest = newMessages.last {
+            parts.append("【今答える対象（最優先）】\n\(latest)")
+        }
+        if let previous = memoryManager.conversationMemory.last(where: { $0.text.hasPrefix("YUi: ") }) {
+            parts.append("【直前に自分が返した内容】\n\(previous.text)")
+        }
         // コメントと音声を並べ替えず、「それ」「さっき」等の参照先を保つ。
         parts.append("【今回の新着発言（時系列順・発言者付き）】\n\(YUiConversationContext.recent(newMessages, bytes: 2000, count: 8).joined(separator: "\n"))")
         parts.append("""
@@ -803,7 +817,7 @@ class YUiManager {
         }
 
         // YUiの経験
-        let expQuery = newMessages.joined(separator: " ")
+        let expQuery = newMessages.suffix(3).joined(separator: " ")
         let relevantExperiences = experienceManager.findRelevantExperiences(query: expQuery, topK: 1)
         if !relevantExperiences.isEmpty {
             parts.append(experienceManager.context(for: relevantExperiences))

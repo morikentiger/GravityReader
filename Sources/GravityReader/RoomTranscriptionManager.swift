@@ -27,7 +27,7 @@ class RoomTranscriptionManager {
     private let silenceGracePeriod: TimeInterval = 0.8
 
     private let audioEngine = AVAudioEngine()
-    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "ja-JP"))
+    private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
 
@@ -60,11 +60,11 @@ class RoomTranscriptionManager {
     /// 現在のセグメントの推定話者
     private var currentSegmentSpeaker: String = "不明"
 
-    /// 前回の部分結果テキスト全体（デルタ計算用）
-    private var previousFullText: String = ""
-
-    /// 話者ごとの累積テキスト
-    private var speakerTexts: [String: String] = [:]
+    private var hypothesis = SpeechHypothesisBuffer()
+    private var partialSpeakers: Set<String> = []
+    private var pendingSpeaker: String?
+    private var pendingSpeakerCount = 0
+    private var recognitionGeneration = UUID()
 
     /// 最後に確定したテキスト（重複排除）
     private var lastConfirmedTexts: [String: String] = [:]
@@ -126,39 +126,20 @@ class RoomTranscriptionManager {
 
     // MARK: - 話者確定
 
-    private func confirmCurrentSegment() {
-        let speaker = currentSegmentSpeaker
-        guard let text = speakerTexts[speaker], !text.isEmpty else { return }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 2 else {
-            speakerTexts.removeValue(forKey: speaker)
-            onClearPartial?(speaker)
-            return
-        }
-        if lastConfirmedTexts[speaker] == trimmed {
-            speakerTexts.removeValue(forKey: speaker)
-            onClearPartial?(speaker)
-            return
-        }
-        lastConfirmedTexts[speaker] = trimmed
-        // パーシャル行を白に変換して確定（黄→白演出）
-        onTranscription?(speaker, trimmed)
-        speakerTexts.removeValue(forKey: speaker)
-    }
-
     private func confirmAllSpeakers() {
-        for speaker in Array(speakerTexts.keys) {
-            let text = speakerTexts[speaker] ?? ""
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.count >= 2 && lastConfirmedTexts[speaker] != trimmed {
-                lastConfirmedTexts[speaker] = trimmed
-                // パーシャル行を白に変換して確定（黄→白演出）
-                onTranscription?(speaker, trimmed)
+        // Dictionaryの順序ではなく、実際の発言順で確定する。
+        for segment in hypothesis.segments {
+            let trimmed = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.count >= 2 && lastConfirmedTexts[segment.speaker] != trimmed {
+                lastConfirmedTexts[segment.speaker] = trimmed
+                onTranscription?(segment.speaker, trimmed)
             } else {
-                onClearPartial?(speaker)
+                onClearPartial?(segment.speaker)
             }
         }
-        speakerTexts.removeAll()
+        for speaker in partialSpeakers { onClearPartial?(speaker) }
+        partialSpeakers.removeAll()
+        hypothesis.reset()
     }
 
     /// 無音になったら確定
@@ -167,7 +148,6 @@ class RoomTranscriptionManager {
         let work = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             self.confirmAllSpeakers()
-            self.previousFullText = ""
             // セッションリフレッシュ（新しい発話用にきれいな状態に）
             self.restartSession()
         }
@@ -217,6 +197,7 @@ class RoomTranscriptionManager {
     private func startSession() {
         guard isListening else { return }
         guard !isRecognizing else { return }
+        speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: AppDefaults.suite.string(forKey: "GR_RecognitionLanguage") ?? "ja-JP"))
         guard let recognizer = speechRecognizer, recognizer.isAvailable else {
             onLog?("⚠️ 音声認識エンジンが利用不可（10秒後リトライ）")
             DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
@@ -292,44 +273,37 @@ class RoomTranscriptionManager {
             }
         }
 
+        let generation = UUID()
+        recognitionGeneration = generation
         recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            guard let self = self else { return }
-
-            if let result = result {
-                let fullText = result.bestTranscription.formattedString
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-
-                if result.isFinal {
-                    // isFinal → デルタ蓄積のみ（パーシャル表示しない）→ 既存の黄色行を白に変換
-                    self.silenceConfirmTimer?.cancel()
-                    self.silenceConfirmTimer = nil
-                    self.attributeDelta(fullText: fullText, silent: true)
-                    self.confirmAllSpeakers()
-                    self.previousFullText = ""
-                } else if !fullText.isEmpty {
-                    self.attributeDelta(fullText: fullText)
-                }
-            }
-
-            if let error = error {
-                let code = (error as NSError).code
-                if code != 1101 && code != 216 {
-                    NSLog("[RoomTx] 認識エラー: \(error.localizedDescription) (code: \(code))")
-                }
-                DispatchQueue.main.async {
-                    self.isRecognizing = false
-                    if self.isListening {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                            self?.startSession()
-                        }
+            DispatchQueue.main.async {
+                guard let self = self, self.recognitionGeneration == generation else { return }
+                if let result = result {
+                    let fullText = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.attributeDelta(fullText: fullText, silent: result.isFinal)
+                    if result.isFinal {
+                        self.confirmAllSpeakers()
+                        self.restartSession()
+                        return
                     }
+                }
+                if let error = error {
+                    let code = (error as NSError).code
+                    if code != 1101 && code != 216 {
+                        NSLog("[RoomTx] 認識エラー: %@ (code: %d)", error.localizedDescription, code)
+                    }
+                    self.confirmAllSpeakers()
+                    self.restartSession()
                 }
             }
         }
 
         self.recognitionRequest = request
         isRecognizing = true
-        previousFullText = ""
+        hypothesis.reset()
+        currentSegmentSpeaker = "不明"
+        pendingSpeaker = nil
+        pendingSpeakerCount = 0
 
         do {
             try audioEngine.start()
@@ -352,61 +326,34 @@ class RoomTranscriptionManager {
         }
     }
 
-    /// 部分結果のデルタを計算し、推定話者に振り分け＋パーシャル表示
+    /// 訂正を反映した最新仮説から、話者別の途中表示を再構築する。
     private func attributeDelta(fullText: String, silent: Bool = false) {
-        // デルタ計算
-        let commonLen = commonPrefixLength(previousFullText, fullText)
-        let delta = String(fullText.suffix(fullText.count - commonLen))
-        previousFullText = fullText
-
-        guard !delta.isEmpty else { return }
-
-        // 声紋から話者推定（新しいデルタが来るたびに試行）
         let identified = identifySpeaker()
-        if identified != "不明" && identified != currentSegmentSpeaker {
-            // 話者が変わった → 前の話者を確定
-            if !currentSegmentSpeaker.isEmpty && currentSegmentSpeaker != "不明" {
-                confirmCurrentSegment()
-            }
-            currentSegmentSpeaker = identified
-        } else if currentSegmentSpeaker == "不明" && identified != "不明" {
-            currentSegmentSpeaker = identified
-        } else if identified == "不明" && currentSegmentSpeaker != "不明" {
-            // マージン不足で識別失敗 → 前の話者が居座るのを防ぐ
-            // 直近で複数回連続「不明」なら話者を切り替える
-            unknownStreakCount += 1
-            if unknownStreakCount >= 3 {
-                if !currentSegmentSpeaker.isEmpty && currentSegmentSpeaker != "不明" {
-                    confirmCurrentSegment()
-                }
-                currentSegmentSpeaker = "不明"
-                unknownStreakCount = 0
-            }
-        }
         if identified != "不明" {
-            unknownStreakCount = 0
-        }
-
-        // デルタを現在の話者に追加
-        speakerTexts[currentSegmentSpeaker, default: ""] += delta
-
-        // パーシャル表示（黄色）— silent時はスキップ（isFinal時は confirmPartialEntry で黄→白変換する）
-        if !silent {
-            let speakerText = speakerTexts[currentSegmentSpeaker] ?? delta
-            DispatchQueue.main.async {
-                self.onPartialResult?(self.currentSegmentSpeaker, speakerText)
+            if currentSegmentSpeaker == "不明" {
+                currentSegmentSpeaker = identified
+            } else if identified != currentSegmentSpeaker {
+                if pendingSpeaker == identified { pendingSpeakerCount += 1 }
+                else { pendingSpeaker = identified; pendingSpeakerCount = 1 }
+                // 声紋の一瞬の揺れで「おじ」等を独立した発言として確定しない。
+                if pendingSpeakerCount >= 2 && fullText.hasPrefix(hypothesis.text) {
+                    currentSegmentSpeaker = identified
+                    pendingSpeaker = nil
+                    pendingSpeakerCount = 0
+                }
+            } else {
+                pendingSpeaker = nil
+                pendingSpeakerCount = 0
             }
         }
-    }
-
-    private func commonPrefixLength(_ a: String, _ b: String) -> Int {
-        let aChars = Array(a)
-        let bChars = Array(b)
-        var i = 0
-        while i < aChars.count && i < bChars.count && aChars[i] == bChars[i] {
-            i += 1
-        }
-        return i
+        hypothesis.update(fullText, speaker: currentSegmentSpeaker)
+        guard !silent else { return }
+        var bySpeaker: [String: String] = [:]
+        for segment in hypothesis.segments { bySpeaker[segment.speaker, default: ""] += segment.text }
+        let speakers = Set(bySpeaker.keys)
+        for speaker in partialSpeakers.subtracting(speakers) { onClearPartial?(speaker) }
+        partialSpeakers = speakers
+        for (speaker, text) in bySpeaker { onPartialResult?(speaker, text) }
     }
 
     private func stopSession() {
@@ -419,10 +366,10 @@ class RoomTranscriptionManager {
         audioEngine.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()
         recognitionRequest = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.recognitionTask?.cancel()
-            self?.recognitionTask = nil
-        }
+        recognitionGeneration = UUID()
+        let task = recognitionTask
+        recognitionTask = nil
+        task?.cancel()
         isRecognizing = false
     }
 
@@ -434,8 +381,10 @@ class RoomTranscriptionManager {
         audioSamplesLock.unlock()
 
         if isListening {
+            let generation = recognitionGeneration
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.startSession()
+                guard let self = self, self.isListening, self.recognitionGeneration == generation else { return }
+                self.startSession()
             }
         }
     }

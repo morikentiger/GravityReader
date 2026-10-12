@@ -6,7 +6,7 @@ class VoiceTranscriptionManager {
     private let audioEngine = AVAudioEngine()
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "ja-JP"))
+    private var speechRecognizer: SFSpeechRecognizer?
 
     private var isRecording = false
     private var spaceHeld = false
@@ -82,6 +82,7 @@ class VoiceTranscriptionManager {
 
     private func startRecording() {
         guard !isRecording else { return }
+        speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: AppDefaults.suite.string(forKey: "GR_RecognitionLanguage") ?? "ja-JP"))
         guard let recognizer = speechRecognizer, recognizer.isAvailable else {
             onLog?("⚠️ 音声認識が利用できません")
             return
