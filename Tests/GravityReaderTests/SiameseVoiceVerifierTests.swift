@@ -83,6 +83,48 @@ final class SiameseVoiceVerifierTests: XCTestCase {
         XCTAssertFalse(verifier.recordEnrollment(speaker: "A", embedding: [1, 0]))
         XCTAssertEqual(try Data(contentsOf: url), bytes)
     }
+    func testOldExtractorArchiveIsPreservedAndNeverUsedForNewFeatures() throws {
+        let url = location()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let bytes = try JSONSerialization.data(withJSONObject: [
+            "version": 1, "extractor": "ecapa-coreml-192-mel80-v1",
+            "observations": [["speaker": "A", "sessionID": "old", "embedding": [1, 0]]]
+        ])
+        let legacy = url.deletingLastPathComponent().appendingPathComponent("siamese_voice_v1.json")
+        try bytes.write(to: legacy)
+        let current = SiameseVoiceVerifier(url: url, dimension: 2)
+        XCTAssertTrue(current.observations.isEmpty)
+        XCTAssertTrue(current.status.contains("再登録"))
+        XCTAssertTrue(current.recordEnrollment(speaker: "A", embedding: [1, 0]))
+        XCTAssertEqual(try Data(contentsOf: legacy), bytes)
+        let stored = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        XCTAssertEqual(stored["extractor"] as? String, SpeakerEmbeddingModel.extractorIdentifier)
+        // Even an old archive placed at the new path must not be read or overwritten.
+        try bytes.write(to: url)
+        let incompatible = SiameseVoiceVerifier(url: url, dimension: 2)
+        XCTAssertTrue(incompatible.observations.isEmpty)
+        XCTAssertFalse(incompatible.recordEnrollment(speaker: "A", embedding: [1, 0]))
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+    }
+
+    func testRejectedEvaluationRemainsVisibleAfterReload() throws {
+        let url = location()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let reason = "異話者の特徴が重なっています（しきい値1.030）"
+        let verifier = SiameseVoiceVerifier(url: url, dimension: 2, train: { _, _ in .rejected(reason) })
+        let rejected = expectation(description: "rejection saved")
+        verifier.onStatusChanged = { status in
+            if status.contains(reason) { rejected.fulfill() }
+        }
+        addExamples(verifier, dimension: 2)
+        wait(for: [rejected], timeout: 3)
+        let reloaded = SiameseVoiceVerifier(url: url, dimension: 2)
+        XCTAssertNil(reloaded.model)
+        XCTAssertTrue(reloaded.summary.contains(reason))
+        XCTAssertEqual(reloaded.enrollmentCounts, ["A": 4, "B": 4])
+    }
+
     func testDiarizerUsesStrictSiameseAndDoesNotSelfTrain() throws {
         let url = location()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

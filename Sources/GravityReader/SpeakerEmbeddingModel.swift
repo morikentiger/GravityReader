@@ -9,6 +9,9 @@ class SpeakerEmbeddingModel {
 
     // MARK: - Constants
 
+    /// Embeddings from earlier frontends must never be compared with this representation.
+    static let extractorIdentifier = "ecapa-coreml-192-speechbrain-fbank-v2"
+
     /// モデルが期待するサンプルレート
     static let modelSampleRate: Float = 16000
     /// 固定入力長（3秒 = 48000サンプル @ 16kHz）
@@ -20,28 +23,13 @@ class SpeakerEmbeddingModel {
     /// 出力埋め込み次元
     static let embeddingDim: Int = 192
 
-    // メル特徴量パラメータ（SpeechBrainのデフォルト: 25ms窓, 10msホップ）
-    private let windowSamples: Int = 400   // 25ms @ 16kHz
-    private let hopSamples: Int = 160      // 10ms @ 16kHz
-    private let fftSize: Int = 512         // 次の2のべき乗
-    private let melLowFreq: Float = 0
-    private let melHighFreq: Float = 8000  // ナイキスト周波数
-
-    // MARK: - Properties
-
     private let modelLock = NSLock()
     private var model: MLModel?
     private var isLoaded = false
     var onLog: ((String) -> Void)?
 
-    /// メルフィルタバンク（初回生成後キャッシュ）
-    private lazy var melFilterBank: [[Float]] = buildMelFilterBank()
-
-    /// FFTセットアップ
-    private lazy var fftSetup: FFTSetup? = {
-        let log2n = vDSP_Length(log2f(Float(fftSize)))
-        return vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
-    }()
+    /// Immutable tables are initialized once, safely even when extraction runs concurrently.
+    private static let frontend = SpeechBrainFilterbank()
 
     // MARK: - Initialization
 
@@ -95,8 +83,15 @@ class SpeakerEmbeddingModel {
         modelLock.unlock()
         guard let model = loadedModel else { return nil }
 
+        guard sampleRate.isFinite, sampleRate > 0,
+              Double(samples.count) / Double(sampleRate) >= 0.5,
+              samples.allSatisfy({ $0.isFinite }),
+              samples.contains(where: { abs($0) > 1e-7 }) else { return nil }
+
         // 1. 16kHzにリサンプル
         let resampled = resample(samples, from: sampleRate, to: SpeakerEmbeddingModel.modelSampleRate)
+
+        guard !resampled.isEmpty else { return nil }
 
         // 2. 固定長にpad/truncate
         let fixed = padOrTruncate(resampled, to: SpeakerEmbeddingModel.fixedLengthSamples)
@@ -116,7 +111,7 @@ class SpeakerEmbeddingModel {
     /// P1-1: AVAudioConverter による高品質リサンプリング（アンチエイリアスフィルタ付き）
     /// フォールバック: 線形補間
     func resample(_ samples: [Float], from srcRate: Float, to dstRate: Float) -> [Float] {
-        guard !samples.isEmpty, srcRate.isFinite, dstRate.isFinite, srcRate > 0, dstRate > 0 else { return [] }
+        guard !samples.isEmpty, samples.allSatisfy({ $0.isFinite }), srcRate.isFinite, dstRate.isFinite, srcRate > 0, dstRate > 0 else { return [] }
         guard srcRate != dstRate else { return samples }
 
         // AVAudioConverter を試行
@@ -204,187 +199,13 @@ class SpeakerEmbeddingModel {
         return samples + [Float](repeating: 0, count: length - samples.count)
     }
 
-    // MARK: - Mel Spectrogram (SpeechBrain互換)
+    // MARK: - SpeechBrain-compatible features
 
-    private func computeMelFeatures(_ samples: [Float]) -> [Float]? {
-        // ★ SpeechBrain互換: center=True, pad_mode='constant'
-        // 信号の両端に n_fft//2 = 200 サンプルのゼロを追加
-        let padSize = windowSamples / 2  // 200
-        let padded = [Float](repeating: 0, count: padSize) + samples + [Float](repeating: 0, count: padSize)
-
-        let numFrames = (padded.count - windowSamples) / hopSamples + 1
-        guard numFrames > 0 else { return nil }
-
-        let targetFrames = SpeakerEmbeddingModel.featTimeDim
-
-        var allFrameFeatures = [[Float]]()
-
-        for frameIdx in 0..<numFrames {
-            let start = frameIdx * hopSamples
-            let end = min(start + windowSamples, padded.count)
-            let frame = Array(padded[start..<end])
-
-            // ★ ハミング窓は windowSamples (400) にのみ適用し、
-            //   FFT用に fftSize (512) までゼロパディング
-            let windowed = applyHammingWindowAndPad(frame)
-
-            // パワースペクトル
-            guard let power = computePowerSpectrum(windowed) else { continue }
-
-            // メルフィルタバンク適用
-            let melEnergies = applyMelFilterBank(power)
-
-            // log（SpeechBrainと同じ: log(max(x, 1e-10))）
-            let logMel = melEnergies.map { logf(max($0, 1e-10)) }
-
-            allFrameFeatures.append(logMel)
-        }
-
-        guard !allFrameFeatures.isEmpty else { return nil }
-
-        // フレーム数をtargetFramesに合わせる（pad or truncate）
-        while allFrameFeatures.count < targetFrames {
-            allFrameFeatures.append([Float](repeating: logf(1e-10), count: SpeakerEmbeddingModel.nMels))
-        }
-        if allFrameFeatures.count > targetFrames {
-            allFrameFeatures = Array(allFrameFeatures.prefix(targetFrames))
-        }
-
-        // CMVN（Cepstral Mean Variance Normalization — SpeechBrainのmean_var_norm相当）
-        let normalized = applyCMVN(allFrameFeatures)
-
-        // [T, 80] → フラット配列 [1, T, 80]
-        return normalized.flatMap { $0 }
-    }
-
-    /// SpeechBrainのInputNormalization相当（グローバル平均・分散正規化）
-    private func applyCMVN(_ frames: [[Float]]) -> [[Float]] {
-        let numFrames = frames.count
-        let numFeats = frames[0].count
-        guard numFrames > 0 else { return frames }
-
-        // 平均を計算
-        var mean = [Float](repeating: 0, count: numFeats)
-        for frame in frames {
-            for i in 0..<numFeats {
-                mean[i] += frame[i]
-            }
-        }
-        let countF = Float(numFrames)
-        for i in 0..<numFeats { mean[i] /= countF }
-
-        // 標準偏差を計算
-        var std = [Float](repeating: 0, count: numFeats)
-        for frame in frames {
-            for i in 0..<numFeats {
-                let diff = frame[i] - mean[i]
-                std[i] += diff * diff
-            }
-        }
-        for i in 0..<numFeats {
-            std[i] = sqrtf(std[i] / countF + 1e-10)
-        }
-
-        // 正規化
-        return frames.map { frame in
-            var normalized = [Float](repeating: 0, count: numFeats)
-            for i in 0..<numFeats {
-                normalized[i] = (frame[i] - mean[i]) / std[i]
-            }
-            return normalized
-        }
-    }
-
-    // MARK: - Signal Processing
-
-    /// ★ ハミング窓を windowSamples (400) にのみ適用し、fftSize (512) にゼロパディング
-    /// SpeechBrain: win_length=400, n_fft=400 だが、vDSPは2のべき乗が必要なので512にパディング
-    private func applyHammingWindowAndPad(_ frame: [Float]) -> [Float] {
-        var result = [Float](repeating: 0, count: fftSize)  // 512: 残りは0
-        let winLen = min(frame.count, windowSamples)  // 400
-        let n = Float(windowSamples)
-        for i in 0..<winLen {
-            let w = 0.54 - 0.46 * cosf(2 * .pi * Float(i) / (n - 1))
-            result[i] = frame[i] * w
-        }
-        return result
-    }
-
-    private func computePowerSpectrum(_ frame: [Float]) -> [Float]? {
-        let n = frame.count
-        let halfN = n / 2
-        let log2n = vDSP_Length(log2f(Float(n)))
-
-        guard let setup = fftSetup else { return nil }
-
-        var realp = [Float](repeating: 0, count: halfN)
-        var imagp = [Float](repeating: 0, count: halfN)
-
-        frame.withUnsafeBufferPointer { buf in
-            buf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfN) { complexPtr in
-                var split = DSPSplitComplex(realp: &realp, imagp: &imagp)
-                vDSP_ctoz(complexPtr, 2, &split, 1, vDSP_Length(halfN))
-            }
-        }
-
-        var split = DSPSplitComplex(realp: &realp, imagp: &imagp)
-        vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
-
-        var power = [Float](repeating: 0, count: halfN)
-        vDSP_zvmags(&split, 1, &power, 1, vDSP_Length(halfN))
-
-        var scale = Float(n * n)
-        vDSP_vsdiv(power, 1, &scale, &power, 1, vDSP_Length(halfN))
-
-        return power
-    }
-
-    // MARK: - Mel Filter Bank
-
-    private func hzToMel(_ hz: Float) -> Float { 2595 * log10f(1 + hz / 700) }
-    private func melToHz(_ mel: Float) -> Float { 700 * (powf(10, mel / 2595) - 1) }
-
-    private func buildMelFilterBank() -> [[Float]] {
-        let halfN = fftSize / 2
-        let melLow = hzToMel(melLowFreq)
-        let melHigh = hzToMel(melHighFreq)
-
-        var melPoints = [Float]()
-        for i in 0...(SpeakerEmbeddingModel.nMels + 1) {
-            let mel = melLow + Float(i) * (melHigh - melLow) / Float(SpeakerEmbeddingModel.nMels + 1)
-            melPoints.append(mel)
-        }
-
-        let binPoints = melPoints.map { mel -> Int in
-            let hz = melToHz(mel)
-            return Int(floorf(hz * Float(fftSize) / SpeakerEmbeddingModel.modelSampleRate))
-        }
-
-        var filterBank = [[Float]]()
-        for m in 1...SpeakerEmbeddingModel.nMels {
-            var filter = [Float](repeating: 0, count: halfN)
-            let left = binPoints[m - 1]
-            let center = binPoints[m]
-            let right = binPoints[m + 1]
-
-            for k in left..<center where k < halfN {
-                filter[k] = Float(k - left) / Float(max(center - left, 1))
-            }
-            for k in center..<right where k < halfN {
-                filter[k] = Float(right - k) / Float(max(right - center, 1))
-            }
-            filterBank.append(filter)
-        }
-
-        return filterBank
-    }
-
-    private func applyMelFilterBank(_ powerSpectrum: [Float]) -> [Float] {
-        melFilterBank.map { filter in
-            var sum: Float = 0
-            vDSP_dotpr(filter, 1, powerSpectrum, 1, &sum, vDSP_Length(min(filter.count, powerSpectrum.count)))
-            return sum
-        }
+    /// Internal for regression checks against the independent NumPy reference fixture.
+    func computeMelFeatures(_ samples: [Float]) -> [Float]? {
+        guard samples.count == Self.fixedLengthSamples,
+              samples.allSatisfy({ $0.isFinite }) else { return nil }
+        return Self.frontend.features(samples)
     }
 
     // MARK: - CoreML Inference
@@ -420,13 +241,10 @@ class SpeakerEmbeddingModel {
         }
 
         // MLMultiArray → [Float]
-        let count = embeddingArray.count
-        var result = [Float](repeating: 0, count: count)
-        let embPtr = embeddingArray.dataPointer.bindMemory(to: Float.self, capacity: count)
-        for i in 0..<count {
-            result[i] = embPtr[i]
-        }
-
+        guard embeddingArray.count == Self.embeddingDim else { return nil }
+        // NSNumber access also handles a CoreML runtime choosing float16/float64 storage.
+        let result = (0..<embeddingArray.count).map { embeddingArray[$0].floatValue }
+        guard result.allSatisfy({ $0.isFinite }), result.contains(where: { abs($0) > 1e-8 }) else { return nil }
         return result
     }
 
@@ -440,6 +258,87 @@ class SpeakerEmbeddingModel {
         var result = vec
         var divisor = norm
         vDSP_vsdiv(result, 1, &divisor, &result, 1, vDSP_Length(vec.count))
+        return result
+    }
+}
+
+/// Matches speechbrain.lobes.features.Fbank(n_mels: 80) and the pretrained
+/// spkrec-ecapa-voxceleb InputNormalization(norm_type: sentence, std_norm: false).
+/// References and an independent NumPy oracle are in generate_speaker_frontend_reference.py.
+private struct SpeechBrainFilterbank {
+    private let length = 400
+    private let bins = 201
+    private let frames = 301
+    private let bands = 80
+    private let window: [Float]
+    private let realBasis: [Float]
+    private let imaginaryBasis: [Float]
+    private let filters: [Float]
+
+    init() {
+        // torch.hamming_window defaults to periodic=True, hence denominator 400, not 399.
+        window = (0..<400).map { Float(0.54 - 0.46 * cos(2 * .pi * Double($0) / 400)) }
+        var real = [Float](), imaginary = [Float]()
+        real.reserveCapacity(400 * 201)
+        imaginary.reserveCapacity(400 * 201)
+        for sample in 0..<400 {
+            for bin in 0..<201 {
+                let phase = 2 * Double.pi * Double(sample * bin) / 400
+                real.append(Float(cos(phase)))
+                imaginary.append(Float(-sin(phase)))
+            }
+        }
+        realBasis = real
+        imaginaryBasis = imaginary
+        let maxMel = 2595 * log10(1 + 8000.0 / 700)
+        let centers = (0..<82).map { 700 * (pow(10, Double($0) * maxMel / 81 / 2595) - 1) }
+        var matrix = [Float](repeating: 0, count: 201 * 80)
+        for bin in 0..<201 {
+            let hz = Double(bin) * 16000 / 400
+            for band in 0..<80 {
+                // SpeechBrain uses the previous mel gap as a symmetric triangular bandwidth.
+                let width = centers[band + 1] - centers[band]
+                matrix[bin * 80 + band] = Float(max(0, 1 - abs(hz - centers[band + 1]) / width))
+            }
+        }
+        filters = matrix
+    }
+
+    func features(_ samples: [Float]) -> [Float] {
+        var windows = [Float](repeating: 0, count: frames * length)
+        for frame in 0..<frames {
+            for offset in 0..<length {
+                let source = frame * 160 + offset - 200
+                if source >= 0 && source < samples.count {
+                    windows[frame * length + offset] = samples[source] * window[offset]
+                }
+            }
+        }
+        // Exact 400-point DFT expressed as two accelerated matrix products. Padding to a
+        // radix-2 FFT would change the trained filterbank. Includes DC and Nyquist separately.
+        let real = multiply(windows, realBasis, rows: frames, inner: length, columns: bins)
+        let imaginary = multiply(windows, imaginaryBasis, rows: frames, inner: length, columns: bins)
+        var power = [Float](repeating: 0, count: frames * bins)
+        for i in power.indices { power[i] = real[i] * real[i] + imaginary[i] * imaginary[i] }
+        let energies = multiply(power, filters, rows: frames, inner: bins, columns: bands)
+        var output = energies.map { 10 * log10f(max($0, 1e-10)) }
+        let floorDB = (output.max() ?? -100) - 80
+        for i in output.indices { output[i] = max(output[i], floorDB) }
+        // The pretrained model subtracts sentence means; variance division is not enabled.
+        for band in 0..<bands {
+            var sum: Float = 0
+            for frame in 0..<frames { sum += output[frame * bands + band] }
+            let mean = sum / Float(frames)
+            for frame in 0..<frames { output[frame * bands + band] -= mean }
+        }
+        return output
+    }
+
+    private func multiply(_ a: [Float], _ b: [Float], rows: Int, inner: Int, columns: Int) -> [Float] {
+        var result = [Float](repeating: 0, count: rows * columns)
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    Int32(rows), Int32(columns), Int32(inner), 1,
+                    a, Int32(inner), b, Int32(columns), 0, &result, Int32(columns))
         return result
     }
 }

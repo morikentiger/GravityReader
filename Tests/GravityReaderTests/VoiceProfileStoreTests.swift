@@ -10,7 +10,9 @@ final class VoiceProfileStoreTests: XCTestCase {
     }
 
     private func fixture(_ name: String, mode: String, dimension: Int) -> [String: Any] {
-        ["name": name, "mode": mode, "features": [Double](repeating: 0.1, count: dimension), "sampleCount": 2]
+        var record: [String: Any] = ["name": name, "mode": mode, "features": [Double](repeating: 0.1, count: dimension), "sampleCount": 2]
+        if mode == "neural" { record["extractor"] = SpeakerEmbeddingModel.extractorIdentifier }
+        return record
     }
 
     private func write(_ records: [[String: Any]], to url: URL) throws {
@@ -86,5 +88,56 @@ final class VoiceProfileStoreTests: XCTestCase {
         let store = VoiceProfileStore(profilesURL: url)
         store.loadProfiles(currentMode: .neural, featureDimension: 192)
         XCTAssertEqual(Set(store.profiles.keys), ["good"])
+    }
+
+    func testLegacyNeuralVectorsAreInactiveAndSurviveNewRegistrationOfSameName() throws {
+        let url = try temporaryURL()
+        var legacy = fixture("Alice", mode: "neural", dimension: 192)
+        legacy.removeValue(forKey: "extractor")
+        var future = fixture("future", mode: "neural", dimension: 192)
+        future["extractor"] = "future-version"
+        let oldRecords = [legacy, future, fixture("Alice", mode: "mfcc", dimension: 39)]
+        try write(oldRecords, to: url)
+        let original = try Data(contentsOf: url)
+        let store = VoiceProfileStore(profilesURL: url)
+        var logs: [String] = []
+        store.onLog = { logs.append($0) }
+        store.loadProfiles(currentMode: .neural, featureDimension: 192)
+        XCTAssertTrue(store.profiles.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: url), original, "loading must preserve existing bytes")
+        XCTAssertTrue(logs.contains { $0.contains("再登録が必要") && $0.contains("Alice") })
+
+        store.profiles["Alice"] = .init(name: "Alice", features: Array(repeating: 0.2, count: 192), sampleCount: 1, mode: .neural)
+        store.saveProfiles()
+        let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [[String: Any]])
+        XCTAssertEqual(saved.count, 4)
+        for old in oldRecords {
+            XCTAssertTrue(saved.contains { NSDictionary(dictionary: $0).isEqual(to: old) }, "every legacy and other-mode record must survive")
+        }
+        let new = try XCTUnwrap(saved.first { $0["extractor"] as? String == SpeakerEmbeddingModel.extractorIdentifier })
+        XCTAssertEqual(new["name"] as? String, "Alice")
+        XCTAssertEqual(new["sampleCount"] as? Int, 1)
+        store.loadProfiles(currentMode: .neural, featureDimension: 192)
+        XCTAssertEqual(Set(store.profiles.keys), ["Alice"])
+        XCTAssertEqual(store.profiles["Alice"]?.features.first, 0.2)
+        store.saveProfiles()
+        let resaved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [[String: Any]])
+        XCTAssertEqual(resaved.count, 4, "saving again must replace only the current representation")
+    }
+
+    func testSavingEmptyNeuralModeKeepsLegacyAndExplicitDeletionRemovesAllVersions() throws {
+        let url = try temporaryURL()
+        var legacy = fixture("Alice", mode: "neural", dimension: 192)
+        legacy.removeValue(forKey: "extractor")
+        try write([legacy], to: url)
+        let store = VoiceProfileStore(profilesURL: url)
+        store.loadProfiles(currentMode: .neural, featureDimension: 192)
+        store.saveProfiles()
+        let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [[String: Any]])
+        XCTAssertEqual(saved.count, 1)
+        XCTAssertTrue(NSDictionary(dictionary: saved[0]).isEqual(to: legacy))
+        store.clearProfile(for: "Alice")
+        let cleared = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [[String: Any]])
+        XCTAssertTrue(cleared.isEmpty)
     }
 }

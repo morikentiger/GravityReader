@@ -4,10 +4,11 @@ import Foundation
 /// snapshot on a private queue. Only explicit, quality-checked enrollments enter it.
 final class SiameseVoiceVerifier {
     private struct Archive: Codable {
-        var version = 1
-        var extractor = "ecapa-coreml-192-mel80-v1"
+        var version = 2
+        var extractor = SpeakerEmbeddingModel.extractorIdentifier
         var observations: [SiameseSpeakerMetric.Observation]
         var model: SiameseSpeakerMetric.Model?
+        var lastEvaluation: String?
     }
     struct Match {
         let speaker: String
@@ -17,6 +18,7 @@ final class SiameseVoiceVerifier {
     private(set) var observations: [SiameseSpeakerMetric.Observation] = []
     private(set) var model: SiameseSpeakerMetric.Model?
     private(set) var status = "登録音声の追加待ち"
+    private var lastEvaluation: String?
     var onStatusChanged: ((String) -> Void)?
     private let url: URL
     private let trainingQueue = DispatchQueue(label: "GravityReader.siamese-training", qos: .utility)
@@ -30,10 +32,14 @@ final class SiameseVoiceVerifier {
     init(url: URL? = nil, dimension: Int = 192,
          train: @escaping ([SiameseSpeakerMetric.Observation], Int) -> SiameseSpeakerMetric.TrainingResult = { SiameseSpeakerMetric.train(observations: $0, dimension: $1) }) {
         self.url = url ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("GravityReader/siamese_voice_v1.json")
+            .appendingPathComponent("GravityReader/siamese_voice_v2.json")
         self.dimension = dimension
         self.train = train
         load()
+        if !FileManager.default.fileExists(atPath: self.url.path),
+           FileManager.default.fileExists(atPath: self.url.deletingLastPathComponent().appendingPathComponent("siamese_voice_v1.json").path) {
+            status = "旧方式の登録データは保持済み。特徴抽出の修正に伴い、各話者の声紋を再登録してください"
+        }
     }
 
     var enrollmentCounts: [String: Int] {
@@ -115,6 +121,7 @@ final class SiameseVoiceVerifier {
     private func invalidateModel() {
         revision = UUID()
         model = nil
+        lastEvaluation = nil
         trainingRequested = false
     }
     private func requestTraining() {
@@ -145,10 +152,13 @@ final class SiameseVoiceVerifier {
                     case .ready(let model):
                         if model.isValid, model.dimension == self.dimension {
                             self.model = model
+                            self.lastEvaluation = nil
                             if self.save() { self.publish("Siamese照合を利用可能（学習に使わない登録録音で検証済み・実環境の精度は未測定）") }
                         } else { self.publish("学習結果が不正なため従来方式を継続") }
                     case .notReady(let reason), .rejected(let reason):
-                        self.publish("従来方式を継続：\(reason)")
+                        let message = "Siamese採用見送り：\(reason)"
+                        self.lastEvaluation = message
+                        if self.save() { self.publish(message) }
                     }
                 }
                 self.startWorkerIfNeeded()
@@ -165,7 +175,7 @@ final class SiameseVoiceVerifier {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         do {
             let archive = try JSONDecoder().decode(Archive.self, from: Data(contentsOf: url))
-            guard archive.version == 1, archive.extractor == "ecapa-coreml-192-mel80-v1",
+            guard archive.version == 2, archive.extractor == SpeakerEmbeddingModel.extractorIdentifier,
                   archive.observations.count <= 192,
                   Set(archive.observations.map { $0.sessionID }).count == archive.observations.count,
                   archive.observations.allSatisfy({ !$0.speaker.isEmpty && !$0.sessionID.isEmpty && normalized($0.embedding) != nil }) else {
@@ -174,19 +184,20 @@ final class SiameseVoiceVerifier {
                 return
             }
             observations = archive.observations
+            lastEvaluation = archive.lastEvaluation
             if let candidate = archive.model, candidate.isValid, candidate.dimension == dimension,
                enrollmentCounts.count >= 2, enrollmentCounts.count <= 16,
                enrollmentCounts.values.allSatisfy({ (4...12).contains($0) }) {
                 model = candidate
                 status = "保存済みSiameseモデルを利用可能（実環境の精度は未測定）"
-            } else { status = "学習材料を読み込み済み・追加登録時に再評価" }
+            } else { status = lastEvaluation ?? "学習材料を読み込み済み・追加登録時に再評価" }
         } catch { storageCompatible = false; publish("学習データを読み込めないため従来方式を使用（既存ファイルは保持）") }
     }
     @discardableResult private func save() -> Bool {
         guard storageCompatible else { return false }
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(Archive(observations: observations, model: model))
+            let data = try JSONEncoder().encode(Archive(observations: observations, model: model, lastEvaluation: lastEvaluation))
             try data.write(to: url, options: .atomic)
             return true
         } catch {

@@ -66,9 +66,15 @@ final class SiameseSpeakerMetricTests: XCTestCase {
 
     func testIndistinguishableSpeakersDoNotReplaceBaseline() {
         let rows = observations().map { SiameseSpeakerMetric.Observation(speaker: $0.speaker, sessionID: $0.sessionID, embedding: [1, 0, 0]) }
-        guard case .rejected = SiameseSpeakerMetric.train(observations: rows, dimension: 3) else {
+        guard case .rejected(let reason) = SiameseSpeakerMetric.train(observations: rows, dimension: 3) else {
             return XCTFail("no discriminative signal must retain baseline")
         }
+        XCTAssertTrue(reason.contains("異話者の特徴が近すぎます"))
+        XCTAssertTrue(reason.contains("必要閾値 1.0300 > 採用上限 0.9800"))
+        XCTAssertTrue(reason.contains("誤受入 0/4"))
+        XCTAssertTrue(reason.contains("誤拒否 2/2"))
+        XCTAssertTrue(reason.contains("入力音源・録音区間・特徴抽出"))
+        XCTAssertFalse(reason.contains("未使用の登録録音で改善を確認できない"))
     }
 
     func testHeldOutFailureCannotBeHiddenByGoodTrainingLoss() {
@@ -78,9 +84,11 @@ final class SiameseSpeakerMetricTests: XCTestCase {
             }
             return row
         }
-        guard case .rejected = SiameseSpeakerMetric.train(observations: rows, dimension: 3) else {
+        guard case .rejected(let reason) = SiameseSpeakerMetric.train(observations: rows, dimension: 3) else {
             return XCTFail("validation false accepts must reject candidate")
         }
+        XCTAssertTrue(reason.contains("別人の声を同一人物として受け入れました"))
+        XCTAssertTrue(reason.contains("誤受入 4/4"))
     }
 
     func testGoodHeldOutPairsCannotHideWrongTrainingReferenceIdentities() {
@@ -92,9 +100,11 @@ final class SiameseSpeakerMetricTests: XCTestCase {
             embedding.swapAt(0, 1)
             return .init(speaker: row.speaker, sessionID: row.sessionID, embedding: embedding)
         }
-        guard case .rejected = SiameseSpeakerMetric.train(observations: rows, dimension: 3) else {
+        guard case .rejected(let reason) = SiameseSpeakerMetric.train(observations: rows, dimension: 3) else {
             return XCTFail("heldout query classification must check real registered identities")
         }
+        XCTAssertTrue(reason.contains("正解 0/4、誤認 4、不明 0"))
+        XCTAssertTrue(reason.contains("正しく照合できた検証録音がない話者：A、B"))
     }
 
     func testContrastiveGradientMatchesFiniteDifferencesForBothClasses() throws {

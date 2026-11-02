@@ -72,6 +72,14 @@ class VoiceProfileStore {
         item["mode"] as? String ?? "mfcc"
     }
 
+    /// A matching dimension does not imply a matching feature representation.
+    /// Legacy neural vectors used a different frontend and cannot be converted
+    /// without the original recording. Keep them stored, but never compare them.
+    private func isCompatible(_ item: [String: Any], with mode: VoiceDiarizer.Mode) -> Bool {
+        guard storedModeName(item) == modeName(mode) else { return false }
+        return mode != .neural || item["extractor"] as? String == SpeakerEmbeddingModel.extractorIdentifier
+    }
+
     private func readStoredProfiles() throws -> [[String: Any]] {
         guard FileManager.default.fileExists(atPath: profilesURL.path) else { return [] }
         let data = try Data(contentsOf: profilesURL)
@@ -106,8 +114,8 @@ class VoiceProfileStore {
             return
         }
         do {
-            // Switching extractors must not erase registrations from another mode.
-            var data = try readStoredProfiles().filter { storedModeName($0) != modeName(mode) }
+            // Preserve inactive modes AND inactive neural frontend versions.
+            var data = try readStoredProfiles().filter { !isCompatible($0, with: mode) }
             for profile in profiles.values.sorted(by: { $0.name < $1.name }) {
                 var dict: [String: Any] = [
                     "name": profile.name,
@@ -116,6 +124,7 @@ class VoiceProfileStore {
                     "sampleCount": profile.sampleCount,
                     "mode": modeName(profile.mode)
                 ]
+                if profile.mode == .neural { dict["extractor"] = SpeakerEmbeddingModel.extractorIdentifier }
                 if let pm = profile.pitchMean { dict["pitchMean"] = Double(pm) }
                 if let ps = profile.pitchStd { dict["pitchStd"] = Double(ps) }
                 data.append(dict)
@@ -127,13 +136,14 @@ class VoiceProfileStore {
     func loadProfiles(currentMode: VoiceDiarizer.Mode, featureDimension: Int) {
         activeMode = currentMode
         activeFeatureDimension = featureDimension
-        // The active dictionary contains only compatible vectors. Inactive modes
-        // remain in the file and are merged back by saveProfiles().
+        // Inactive modes and frontend versions remain in the file and are merged
+        // back by saveProfiles(). Loading never rewrites existing registrations.
         profiles.removeAll()
         guard featureDimension > 0 else { return }
         do {
-            for item in try readStoredProfiles() {
-                guard storedModeName(item) == modeName(currentMode),
+            let stored = try readStoredProfiles()
+            for item in stored {
+                guard isCompatible(item, with: currentMode),
                       let name = item["name"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       let count = item["sampleCount"] as? Int, count > 0,
                       let feats = item["features"] as? [Double], feats.count == featureDimension,
@@ -146,6 +156,16 @@ class VoiceProfileStore {
             }
             if !profiles.isEmpty {
                 onLog?("🎤 声紋プロファイル読み込み(\(modeName(currentMode))): \(profiles.keys.sorted().joined(separator: ", "))")
+            }
+            if currentMode == .neural {
+                let inactiveNames = Set(stored.compactMap { item -> String? in
+                    guard storedModeName(item) == "neural", !isCompatible(item, with: .neural),
+                          let name = item["name"] as? String, !name.isEmpty, profiles[name] == nil else { return nil }
+                    return name
+                }).sorted()
+                if !inactiveNames.isEmpty {
+                    onLog?("⚠️ 旧方式の声紋は保存したまま照合から除外しました。音声前処理の修正に伴い再登録が必要です: \(inactiveNames.joined(separator: ", "))")
+                }
             }
         } catch {
             onLog?("⚠️ 声紋プロファイルを読み込めません。保存済みファイルは保持します。")

@@ -417,6 +417,7 @@ class RoomTranscriptionManager {
 
     /// 登録中の音声収集タイマー
     private var enrollTimer: Timer?
+    private var enrollmentSession = VoiceEnrollmentSessionState()
 
     /// 登録のためだけにマイクを起動したかどうか（完了後に停止する）
     private var startedMicForEnrollment = false
@@ -451,6 +452,7 @@ class RoomTranscriptionManager {
         silenceConfirmTimer?.cancel()
         isEnrolling = true
         enrollingUser = user
+        let session = enrollmentSession.begin()
 
         // マイクが動いてなければ一時起動
         if !isListening {
@@ -468,7 +470,7 @@ class RoomTranscriptionManager {
         // YUiが指示 → TTS完了を待ってから録音開始
         onSpeakRequest?("\(user)さん、声を覚えたいから、次の文章を読み上げてくれる？「\(text)」") { [weak self] in
             guard let self = self, self.isEnrolling else { return }
-            self.startRecording(for: user)
+            self.startRecording(for: user, session: session)
         }
     }
 
@@ -527,7 +529,10 @@ class RoomTranscriptionManager {
     }
 
     /// TTS完了後に録音開始
-    private func startRecording(for user: String) {
+    private func startRecording(for user: String, session: UUID) {
+        // A cancelled registration's delayed TTS callback must not start a new
+        // timer or clear the buffer of a later registration, even for the same name.
+        guard isEnrolling, enrollingUser == user, enrollmentSession.startRecording(session) else { return }
         onLog?("🎤 \(user)さん、どうぞ！（12秒間録音します）")
 
         // 音声バッファをクリア（YUiの声を完全に除外）
@@ -538,12 +543,13 @@ class RoomTranscriptionManager {
 
         // 12秒後に録音終了＆声紋登録
         enrollTimer = Timer.scheduledTimer(withTimeInterval: 12, repeats: false) { [weak self] _ in
-            self?.completeEnrollment(for: user)
+            self?.completeEnrollment(for: user, session: session)
         }
     }
 
     /// ユーザーの声紋登録を完了（品質検査付き: P0-2）
-    private func completeEnrollment(for user: String) {
+    private func completeEnrollment(for user: String, session: UUID) {
+        guard isEnrolling, enrollingUser == user, enrollmentSession.completeRecording(session) else { return }
         audioSamplesLock.lock()
         let nativeSamples = recentAudioSamples
         let rate = capturedSampleRate
@@ -564,7 +570,7 @@ class RoomTranscriptionManager {
         let result = diarizer.enrollWithQualityCheck(speaker: user, samples: samples)
         if result.success {
             onLog?("✅ \(user)さんの声紋登録完了！（\(seconds)秒分の音声）")
-            onSpeakRequest?("\(user)さん、ありがとう！声を覚えたよ！", nil)
+            onSpeakRequest?("\(user)さん、ありがとう！登録用の声を受け取ったよ！", nil)
         } else {
             onLog?("❌ \(user)さんの声紋登録失敗: \(result.message)")
             onSpeakRequest?("\(user)さん、ごめん、\(result.message)。もう一回試してみてくれる？", nil)
@@ -574,6 +580,7 @@ class RoomTranscriptionManager {
     }
 
     private func cleanupEnrollment() {
+        enrollmentSession.cancel()
         audioSamplesLock.lock()
         captureDuration = 3
         recentAudioSamples.removeAll()
@@ -595,5 +602,36 @@ class RoomTranscriptionManager {
         guard isEnrolling else { return }
         cleanupEnrollment()
         onLog?("🎤 声紋登録を中止しました")
+    }
+}
+
+/// Main-queue lifecycle for delayed enrollment callbacks. Each registration has
+/// its own token, and each recording may start and complete only once.
+struct VoiceEnrollmentSessionState {
+    private var current: UUID?
+    private var recording = false
+
+    mutating func begin() -> UUID {
+        let token = UUID()
+        current = token
+        recording = false
+        return token
+    }
+
+    mutating func startRecording(_ token: UUID) -> Bool {
+        guard current == token, !recording else { return false }
+        recording = true
+        return true
+    }
+
+    mutating func completeRecording(_ token: UUID) -> Bool {
+        guard current == token, recording else { return false }
+        cancel()
+        return true
+    }
+
+    mutating func cancel() {
+        current = nil
+        recording = false
     }
 }

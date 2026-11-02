@@ -61,7 +61,11 @@ class VoiceDiarizer {
     init(profileStore: VoiceProfileStore = VoiceProfileStore(), siameseVerifier: SiameseVoiceVerifier = SiameseVoiceVerifier()) {
         self.profileStore = profileStore
         self.siameseVerifier = siameseVerifier
-        siameseVerifier.onStatusChanged = { [weak self] status in self?.onLog?("🧠 声紋学習: \(status)") }
+        siameseVerifier.onStatusChanged = { [weak self] status in
+            let firstLine = status.components(separatedBy: "\n").first ?? status
+            let details = status.contains("\n") ? "（詳細は「Siamese学習の状態…」）" : ""
+            self?.onLog?("🧠 声紋学習: \(firstLine)\(details)")
+        }
     }
 
     var isUsingSiamese: Bool {

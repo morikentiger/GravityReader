@@ -142,7 +142,17 @@ enum SiameseSpeakerMetric {
         guard threshold <= 0.98, learned.far == 0,
               learned.far <= baseline.far, learned.frr <= baseline.frr,
               learned.loss + 0.001 < baseline.loss else {
-            return .rejected("未使用の登録録音で改善を確認できないため、従来の照合を維持します")
+            var reasons: [String] = []
+            if threshold > 0.98 {
+                reasons.append(String(format: "異話者の特徴が近すぎます（学習録音の異話者最大類似度 %.4f、必要閾値 %.4f > 採用上限 0.9800）", threshold - 0.03, threshold))
+            }
+            if learned.falseAccepts > 0 { reasons.append("検証で別人の声を同一人物として受け入れました") }
+            if learned.frr > baseline.frr { reasons.append("検証で同じ人の声を拒否する割合が従来より増えました") }
+            if learned.loss + 0.001 >= baseline.loss { reasons.append("検証の損失改善が必要量 0.001 に届きませんでした") }
+            let nextStep = threshold > 0.98
+                ? "入力音源・録音区間・特徴抽出を確認してください。別人の声がほぼ同じ特徴のままでは、登録回数を増やしても解決しません。"
+                : "登録した人と音源が一致しているか確認し、他の声や読み上げが混ざらない状態で別の文章を登録してください。"
+            return .rejected(reasons.joined(separator: "／") + "\n" + validationSummary(learned, baseline: baseline) + "\n" + nextStep)
         }
         let margin = calibratedMargin(pairs: allTrainPairs, scales: scales)
         let baselineMargin = calibratedMargin(pairs: allTrainPairs, scales: identity)
@@ -153,7 +163,12 @@ enum SiameseSpeakerMetric {
         let baselineRecognized = identifyHeldOut(validation, references: training, scales: identity, threshold: baselineThreshold, margin: baselineMargin)
         guard recognized.wrong == 0, recognized.correct >= baselineRecognized.correct,
               Set(recognized.recognizedSpeakers) == Set(speakers.keys) else {
-            return .rejected("別録音を登録話者へ照合する検証に通らないため、従来方式を維持します")
+            let missing = Set(speakers.keys).subtracting(recognized.recognizedSpeakers).sorted().joined(separator: "、")
+            let counts = "別録音の話者照合：正解 \(recognized.correct)/\(validation.count)、誤認 \(recognized.wrong)、不明 \(validation.count - recognized.correct - recognized.wrong)（従来の正解 \(baselineRecognized.correct)/\(validation.count)）"
+            let unresolved = missing.isEmpty ? "" : "\n正しく照合できた検証録音がない話者：\(missing)"
+            return .rejected("別録音を登録話者へ照合する検証に通りませんでした\n" + counts + unresolved
+                + "\n" + validationSummary(learned, baseline: baseline)
+                + "\n各話者の登録名と入力音源を確認し、他の声が混ざらない別の文章で登録してください。")
         }
         let report = Validation(trainingSessions: training.count, validationSessions: validation.count,
                                 positivePairs: validationPairs.filter(\.same).count,
@@ -253,12 +268,31 @@ enum SiameseSpeakerMetric {
         return max(0.45, maxNegative + 0.03)
     }
 
-    private static func evaluate(_ pairs: [Pair], scales: [Float], threshold: Float) -> (far: Float, frr: Float, loss: Float) {
+    private struct Evaluation {
+        let falseAccepts: Int
+        let falseRejects: Int
+        let positivePairs: Int
+        let negativePairs: Int
+        let loss: Float
+        var far: Float { Float(falseAccepts) / Float(negativePairs) }
+        var frr: Float { Float(falseRejects) / Float(positivePairs) }
+    }
+
+    private static func validationSummary(_ learned: Evaluation, baseline: Evaluation) -> String {
+        String(format: "別録音での検証：誤受入 %d/%d（%.1f%%、従来 %.1f%%）、誤拒否 %d/%d（%.1f%%、従来 %.1f%%）、損失 %.4f（従来 %.4f）",
+               learned.falseAccepts, learned.negativePairs, learned.far * 100, baseline.far * 100,
+               learned.falseRejects, learned.positivePairs, learned.frr * 100, baseline.frr * 100,
+               learned.loss, baseline.loss)
+    }
+
+    private static func evaluate(_ pairs: [Pair], scales: [Float], threshold: Float) -> Evaluation {
         let positive = pairs.filter(\.same).map { score($0.a, $0.b, scales: scales) }
         let negative = pairs.filter { !$0.same }.map { score($0.a, $0.b, scales: scales) }
         let posLoss = positive.map { (1 - $0) * (1 - $0) }.reduce(0, +) / Float(positive.count)
         let negLoss = negative.map { max(0, $0 - 0.2) * max(0, $0 - 0.2) }.reduce(0, +) / Float(negative.count)
-        return (Float(negative.filter { $0 >= threshold }.count) / Float(negative.count),
-                Float(positive.filter { $0 < threshold }.count) / Float(positive.count), (posLoss + negLoss) / 2)
+        return Evaluation(falseAccepts: negative.filter { $0 >= threshold }.count,
+                          falseRejects: positive.filter { $0 < threshold }.count,
+                          positivePairs: positive.count, negativePairs: negative.count,
+                          loss: (posLoss + negLoss) / 2)
     }
 }
