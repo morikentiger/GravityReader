@@ -54,7 +54,26 @@ class VoiceDiarizer {
     // MARK: - サブコンポーネント
 
     let embeddingModel = SpeakerEmbeddingModel()
-    let profileStore = VoiceProfileStore()
+    let profileStore: VoiceProfileStore
+    let siameseVerifier: SiameseVoiceVerifier
+    var siameseEnabled: Bool = AppDefaults.suite.object(forKey: "GR_SiameseVoiceEnabled") as? Bool ?? true
+
+    init(profileStore: VoiceProfileStore = VoiceProfileStore(), siameseVerifier: SiameseVoiceVerifier = SiameseVoiceVerifier()) {
+        self.profileStore = profileStore
+        self.siameseVerifier = siameseVerifier
+        siameseVerifier.onStatusChanged = { [weak self] status in self?.onLog?("🧠 声紋学習: \(status)") }
+    }
+
+    var isUsingSiamese: Bool {
+        mode == .neural && siameseEnabled && siameseVerifier.canUseModel(for: neuralSpeakerNames)
+    }
+    private var neuralSpeakerNames: Set<String> {
+        Set(profileStore.profiles.values.filter { $0.mode == .neural }.map { $0.name })
+    }
+    var siameseStatus: String {
+        let active = isUsingSiamese ? "現在の照合：Siamese" : "現在の照合：従来方式（モデル・登録者・設定が揃ったら切替）"
+        return active + "\n" + siameseVerifier.summary
+    }
     let voting = VoiceTemporalVoting()
     let mfccExtractor = MFCCFeatureExtractor()
 
@@ -122,16 +141,14 @@ class VoiceDiarizer {
         }
     }
 
-    private func switchToNeuralMode() {
-        let hadProfiles = !profileStore.profiles.isEmpty
+    func switchToNeuralMode() {
+        guard mode != .neural else { return }
         mode = .neural
-        onLog?("🧠 声紋識別: ECAPA-TDNN ニューラルモードに切り替え")
-        if hadProfiles {
-            let names = profileStore.profiles.keys.joined(separator: ", ")
-            profileStore.profiles.removeAll()
-            profileStore.saveProfiles()
-            onLog?("⚠️ \(names) の声紋はニューラルモード用に再登録が必要です")
-        }
+        setupSubcomponentLogs()
+        // Mode changes never erase registrations of either representation.
+        profileStore.loadProfiles(currentMode: .neural, featureDimension: SpeakerEmbeddingModel.embeddingDim)
+        voting.clearVotingHistory()
+        onLog?("🧠 声紋識別: ECAPA-TDNN（Siamese学習の状態は音声と声紋メニュー）")
     }
 
     // MARK: - ログ連携
@@ -169,9 +186,9 @@ class VoiceDiarizer {
     }
 
     func enroll(speaker: String, features: [Float]) {
-        guard features.count == featureDimension else { return }
+        guard features.count == featureDimension, features.allSatisfy({ $0.isFinite }) else { return }
 
-        if var existing = profileStore.profiles[speaker] {
+        if var existing = profileStore.profiles[speaker], existing.mode == mode, existing.features.count == featureDimension {
             let alpha: Float = 2.0 / Float(min(existing.sampleCount + 2, 20))
             var updated = existing.features
             for i in 0..<featureDimension {
@@ -240,12 +257,15 @@ class VoiceDiarizer {
             }
         }
 
-        guard let features = embeddingModel.extractEmbedding(from: samples, sampleRate: mfccExtractor.sampleRate) else {
+        guard let features = extractFeatures(from: samples) else {
             return (false, "特徴量の抽出に失敗しました")
         }
 
         enroll(speaker: speaker, features: features)
         enrollPitchStats(speaker: speaker, samples: samples)
+        if mode == .neural {
+            _ = siameseVerifier.recordEnrollment(speaker: speaker, embedding: features)
+        }
 
         return (true, "登録完了！品質: RMS=\(String(format: "%.3f", quality.averageRMS)) 有声率=\(String(format: "%.0f%%", quality.voicedRatio * 100))")
     }
@@ -255,7 +275,7 @@ class VoiceDiarizer {
     }
 
     func identify(features: [Float]) -> (speaker: String, confidence: Float)? {
-        guard features.count == featureDimension else { return nil }
+        guard features.count == featureDimension, features.allSatisfy({ $0.isFinite }) else { return nil }
         guard !profileStore.profiles.isEmpty else { return nil }
 
         switch mode {
@@ -267,7 +287,7 @@ class VoiceDiarizer {
     }
 
     func identifyWithConfidence(features: [Float]) -> (speaker: String, confidence: Float, level: IdentifyConfidence)? {
-        guard features.count == featureDimension else { return nil }
+        guard features.count == featureDimension, features.allSatisfy({ $0.isFinite }) else { return nil }
         guard !profileStore.profiles.isEmpty else { return nil }
         guard mode == .neural else {
             if let r = identifyMFCC(features: features) {
@@ -283,7 +303,11 @@ class VoiceDiarizer {
 
     func adaptiveUpdate(speaker: String, features: [Float]) {
         lastAdaptiveRejectedReason = nil
-        guard features.count == featureDimension else { return }
+        guard !isUsingSiamese else {
+            lastAdaptiveRejectedReason = "siamese_uses_explicit_enrollment_only"
+            return
+        }
+        guard features.count == featureDimension, features.allSatisfy({ $0.isFinite }) else { return }
         guard var profile = profileStore.profiles[speaker] else { return }
         guard profile.mode == mode else { return }
 
@@ -338,6 +362,20 @@ class VoiceDiarizer {
 
     private func identifyNeural(features: [Float]) -> (result: (speaker: String, confidence: Float), level: IdentifyConfidence)? {
         setupSubcomponentLogs()
+        if isUsingSiamese {
+            lastIdentifySamples = nil
+            voting.clearVotingHistory()
+            // A learned rejection stays unknown; legacy voting must not override it.
+            let match = siameseVerifier.identify(features, speakers: neuralSpeakerNames)
+            profileStore.writeDiagnosticEvent(IdentificationDebugEvent(
+                timestamp: Date(), mode: "siamese", topSpeaker: match?.speaker,
+                topSimilarity: match?.similarity, secondSpeaker: nil, secondSimilarity: nil,
+                margin: match?.margin, decisionType: match == nil ? "unknown" : "siamese_strict",
+                recentVotes: [], finalDecision: match?.speaker ?? "不明",
+                unknownReason: match == nil ? "siamese_threshold_or_margin" : nil,
+                adaptiveUpdated: false, adaptiveRejectedReason: "explicit_enrollment_only", inputQuality: nil))
+            return match.map { (($0.speaker, $0.similarity), .strict) }
+        }
         var results: [(name: String, similarity: Float)] = []
 
         for (name, profile) in profileStore.profiles {
@@ -479,6 +517,7 @@ class VoiceDiarizer {
         var results: [(name: String, distance: Float)] = []
 
         for (name, profile) in profileStore.profiles {
+            guard profile.mode == .mfcc, profile.features.count == features.count else { continue }
             let dist = euclideanDistance(features, profile.features)
             results.append((name, dist))
         }
@@ -524,9 +563,14 @@ class VoiceDiarizer {
 
     // MARK: - プロファイル管理（委譲）
 
-    func clearProfile(for speaker: String) { profileStore.clearProfile(for: speaker) }
+    func clearProfile(for speaker: String) {
+        profileStore.clearProfile(for: speaker)
+        siameseVerifier.removeSpeaker(speaker)
+        voting.clearVotingHistory()
+    }
     func clearAllProfiles() {
         profileStore.clearAllProfiles()
+        siameseVerifier.removeAll()
         voting.clearVotingHistory()
     }
     func clearVotingHistory() { voting.clearVotingHistory() }

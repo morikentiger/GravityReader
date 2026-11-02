@@ -186,6 +186,23 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return self?.roomTranscription?.diarizer.registeredSpeakers ?? []
         }
 
+        statusBarController?.onToggleSiamese = { [weak self] in
+            guard let diarizer = self?.roomTranscription?.diarizer else { return false }
+            diarizer.siameseEnabled.toggle()
+            AppDefaults.suite.set(diarizer.siameseEnabled, forKey: "GR_SiameseVoiceEnabled")
+            diarizer.clearVotingHistory()
+            return diarizer.siameseEnabled
+        }
+        statusBarController?.onShowSiameseStatus = { [weak self] in
+            guard let diarizer = self?.roomTranscription?.diarizer else { return }
+            let alert = NSAlert()
+            alert.messageText = "Siamese声紋学習"
+            alert.informativeText = diarizer.siameseStatus
+            alert.addButton(withTitle: "閉じる")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
+
         statusBarController?.onClearAllVoiceProfiles = { [weak self] in
             self?.roomTranscription?.diarizer.clearAllProfiles()
             self?.logWindowController?.addEntry("🗑 全声紋プロファイルをクリアしました。再登録してください。")

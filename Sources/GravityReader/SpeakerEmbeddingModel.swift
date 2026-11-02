@@ -29,6 +29,7 @@ class SpeakerEmbeddingModel {
 
     // MARK: - Properties
 
+    private let modelLock = NSLock()
     private var model: MLModel?
     private var isLoaded = false
     var onLog: ((String) -> Void)?
@@ -52,7 +53,10 @@ class SpeakerEmbeddingModel {
     }
 
     private func loadModel() {
-        guard !isLoaded else { return }
+        modelLock.lock()
+        let alreadyLoaded = isLoaded
+        modelLock.unlock()
+        guard !alreadyLoaded else { return }
 
         // Bundle.module からmlpackageを取得してコンパイル
         guard let modelURL = Bundle.module.url(forResource: "SpeakerEmbedding", withExtension: "mlpackage") else {
@@ -64,8 +68,11 @@ class SpeakerEmbeddingModel {
             let compiledURL = try MLModel.compileModel(at: modelURL)
             let config = MLModelConfiguration()
             config.computeUnits = .all  // Neural Engine + GPU + CPU
-            model = try MLModel(contentsOf: compiledURL)
+            let loadedModel = try MLModel(contentsOf: compiledURL, configuration: config)
+            modelLock.lock()
+            model = loadedModel
             isLoaded = true
+            modelLock.unlock()
             onLog?("🧠 ECAPA-TDNN モデルロード完了")
         } catch {
             onLog?("⚠️ ECAPA-TDNN ロード失敗: \(error.localizedDescription)")
@@ -73,13 +80,20 @@ class SpeakerEmbeddingModel {
     }
 
     /// モデルが利用可能か
-    var isAvailable: Bool { isLoaded && model != nil }
+    var isAvailable: Bool {
+        modelLock.lock()
+        defer { modelLock.unlock() }
+        return isLoaded && model != nil
+    }
 
     // MARK: - Embedding Extraction
 
     /// 44100Hz音声から192次元埋め込みを抽出
     func extractEmbedding(from samples: [Float], sampleRate: Float = 44100) -> [Float]? {
-        guard let model = model else { return nil }
+        modelLock.lock()
+        let loadedModel = model
+        modelLock.unlock()
+        guard let model = loadedModel else { return nil }
 
         // 1. 16kHzにリサンプル
         let resampled = resample(samples, from: sampleRate, to: SpeakerEmbeddingModel.modelSampleRate)
@@ -101,7 +115,8 @@ class SpeakerEmbeddingModel {
 
     /// P1-1: AVAudioConverter による高品質リサンプリング（アンチエイリアスフィルタ付き）
     /// フォールバック: 線形補間
-    private func resample(_ samples: [Float], from srcRate: Float, to dstRate: Float) -> [Float] {
+    func resample(_ samples: [Float], from srcRate: Float, to dstRate: Float) -> [Float] {
+        guard !samples.isEmpty, srcRate.isFinite, dstRate.isFinite, srcRate > 0, dstRate > 0 else { return [] }
         guard srcRate != dstRate else { return samples }
 
         // AVAudioConverter を試行

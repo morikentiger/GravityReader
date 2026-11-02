@@ -47,9 +47,9 @@ class RoomTranscriptionManager {
 
     /// 音声バッファを一時蓄積（声紋抽出用）
     private var recentAudioSamples: [Float] = []
-    private let maxAudioSamplesForProfile: Int = 44100 * 3  // 3秒分（登録用）
-    private let identifyAudioWindow: Int = 44100 * 2        // 2秒分（埋め込み品質と混合のバランス）
     private var audioSamplesLock = NSLock()
+    private var capturedSampleRate: Double = 44100
+    private var captureDuration: Double = 3
 
     /// 識別スロットル（重い処理を毎回やらない）
     private var lastIdentifyTime: Date?
@@ -108,7 +108,7 @@ class RoomTranscriptionManager {
         isListening = true
         let speakers = diarizer.registeredSpeakers
         if speakers.isEmpty {
-            onLog?("🎙 ルーム音声文字起こし開始（声紋学習モード — チャットすると声を覚えます）")
+            onLog?("🎙 ルーム音声文字起こし開始（声紋未登録 — 音声と声紋メニューから登録できます）")
         } else {
             onLog?("🎙 ルーム音声文字起こし開始（登録済み声紋: \(speakers.joined(separator: ", "))）")
         }
@@ -117,6 +117,7 @@ class RoomTranscriptionManager {
 
     func stop() {
         isListening = false
+        if isEnrolling { cleanupEnrollment() }
         stopSession()
         confirmAllSpeakers()
         isSomeoneSpeaking = false
@@ -146,7 +147,7 @@ class RoomTranscriptionManager {
     private func scheduleSilenceConfirm() {
         silenceConfirmTimer?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, !self.isEnrolling else { return }
             self.confirmAllSpeakers()
             // セッションリフレッシュ（新しい発話用にきれいな状態に）
             self.restartSession()
@@ -162,6 +163,7 @@ class RoomTranscriptionManager {
     private var unknownStreakCount: Int = 0
 
     private func identifySpeaker() -> String {
+        guard !isEnrolling else { return "不明" }
         // スロットル: 0.5秒に1回だけ実行
         if let last = lastIdentifyTime, Date().timeIntervalSince(last) < identifyInterval {
             return lastIdentifiedSpeaker
@@ -169,10 +171,12 @@ class RoomTranscriptionManager {
         lastIdentifyTime = Date()
 
         audioSamplesLock.lock()
-        // 識別には直近1秒分だけ使う（混ざりにくい）
-        let windowSize = min(recentAudioSamples.count, identifyAudioWindow)
-        let samples = Array(recentAudioSamples.suffix(windowSize))
+        // 識別には直近2秒分を実際のサンプルレートで取り出す
+        let rate = capturedSampleRate
+        let windowSize = min(recentAudioSamples.count, Int(rate * 2))
+        let nativeSamples = Array(recentAudioSamples.suffix(windowSize))
         audioSamplesLock.unlock()
+        let samples = diarizer.embeddingModel.resample(nativeSamples, from: Float(rate), to: 44100)
 
         guard samples.count >= 22050 else { return "不明" }  // 最低0.5秒
 
@@ -195,7 +199,7 @@ class RoomTranscriptionManager {
     // MARK: - Session Management
 
     private func startSession() {
-        guard isListening else { return }
+        guard isListening, !isEnrolling else { return }
         guard !isRecognizing else { return }
         speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: AppDefaults.suite.string(forKey: "GR_RecognitionLanguage") ?? "ja-JP"))
         guard let recognizer = speechRecognizer, recognizer.isAvailable else {
@@ -218,6 +222,10 @@ class RoomTranscriptionManager {
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
+        audioSamplesLock.lock()
+        capturedSampleRate = format.sampleRate
+        recentAudioSamples.removeAll()
+        audioSamplesLock.unlock()
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self = self else { return }
@@ -264,9 +272,9 @@ class RoomTranscriptionManager {
                 if rms >= self.speakingThreshold {
                     self.audioSamplesLock.lock()
                     self.recentAudioSamples.append(contentsOf: samples)
-                    // 最大3秒分に制限
-                    if self.recentAudioSamples.count > self.maxAudioSamplesForProfile {
-                        self.recentAudioSamples.removeFirst(self.recentAudioSamples.count - self.maxAudioSamplesForProfile)
+                    let limit = Int(format.sampleRate * self.captureDuration)
+                    if self.recentAudioSamples.count > limit {
+                        self.recentAudioSamples.removeFirst(self.recentAudioSamples.count - limit)
                     }
                     self.audioSamplesLock.unlock()
                 }
@@ -277,10 +285,10 @@ class RoomTranscriptionManager {
         recognitionGeneration = generation
         recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             DispatchQueue.main.async {
-                guard let self = self, self.recognitionGeneration == generation else { return }
+                guard let self = self, self.recognitionGeneration == generation, !self.isEnrolling else { return }
                 if let result = result {
                     let fullText = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self.attributeDelta(fullText: fullText, silent: result.isFinal)
+                    if !self.isEnrolling { self.attributeDelta(fullText: fullText, silent: result.isFinal) }
                     if result.isFinal {
                         self.confirmAllSpeakers()
                         self.restartSession()
@@ -329,6 +337,12 @@ class RoomTranscriptionManager {
     /// 訂正を反映した最新仮説から、話者別の途中表示を再構築する。
     private func attributeDelta(fullText: String, silent: Bool = false) {
         let identified = identifySpeaker()
+        if identified == "不明" && diarizer.isUsingSiamese {
+            // A rejected voice must not inherit the last person's name in the UI.
+            currentSegmentSpeaker = "不明"
+            pendingSpeaker = nil
+            pendingSpeakerCount = 0
+        }
         if identified != "不明" {
             if currentSegmentSpeaker == "不明" {
                 currentSegmentSpeaker = identified
@@ -374,6 +388,7 @@ class RoomTranscriptionManager {
     }
 
     private func restartSession() {
+        guard !isEnrolling else { return }
         stopSession()
         // 音声バッファをクリア（新しいセッション用）
         audioSamplesLock.lock()
@@ -432,6 +447,8 @@ class RoomTranscriptionManager {
             return
         }
 
+        confirmAllSpeakers()
+        silenceConfirmTimer?.cancel()
         isEnrolling = true
         enrollingUser = user
 
@@ -441,8 +458,8 @@ class RoomTranscriptionManager {
             startEnrollmentMic()
         }
 
-        // ランダムなテキストを選択
-        let textIndex = abs(user.hashValue) % enrollmentTexts.count
+        // 独立した登録ごとに異なる文章を案内
+        let textIndex = (diarizer.siameseVerifier.enrollmentCounts[user] ?? 0) % enrollmentTexts.count
         let text = enrollmentTexts[textIndex]
 
         onLog?("🎤 \(user)さんの声紋登録開始…")
@@ -455,9 +472,6 @@ class RoomTranscriptionManager {
         }
     }
 
-    /// 登録用バッファの上限（12秒分）
-    private let maxEnrollmentSamples: Int = 44100 * 12
-
     /// 声紋登録専用のマイク起動（音声認識なし、音声のある部分だけ蓄積）
     private func startEnrollmentMic() {
         if audioEngine.isRunning {
@@ -467,6 +481,10 @@ class RoomTranscriptionManager {
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
+        audioSamplesLock.lock()
+        capturedSampleRate = format.sampleRate
+        recentAudioSamples.removeAll()
+        audioSamplesLock.unlock()
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self = self, !self.isTTSPlaying else { return }
@@ -484,8 +502,9 @@ class RoomTranscriptionManager {
             self.audioSamplesLock.lock()
             self.recentAudioSamples.append(contentsOf: samples)
             // 登録用は12秒分まで蓄積
-            if self.recentAudioSamples.count > self.maxEnrollmentSamples {
-                self.recentAudioSamples.removeFirst(self.recentAudioSamples.count - self.maxEnrollmentSamples)
+            let limit = Int(format.sampleRate * 12)
+            if self.recentAudioSamples.count > limit {
+                self.recentAudioSamples.removeFirst(self.recentAudioSamples.count - limit)
             }
             self.audioSamplesLock.unlock()
         }
@@ -514,6 +533,7 @@ class RoomTranscriptionManager {
         // 音声バッファをクリア（YUiの声を完全に除外）
         audioSamplesLock.lock()
         recentAudioSamples.removeAll()
+        captureDuration = 12
         audioSamplesLock.unlock()
 
         // 12秒後に録音終了＆声紋登録
@@ -525,9 +545,11 @@ class RoomTranscriptionManager {
     /// ユーザーの声紋登録を完了（品質検査付き: P0-2）
     private func completeEnrollment(for user: String) {
         audioSamplesLock.lock()
-        let samples = recentAudioSamples
+        let nativeSamples = recentAudioSamples
+        let rate = capturedSampleRate
         recentAudioSamples.removeAll()
         audioSamplesLock.unlock()
+        let samples = diarizer.embeddingModel.resample(nativeSamples, from: Float(rate), to: 44100)
 
         let seconds = samples.count / 44100
 
@@ -552,6 +574,10 @@ class RoomTranscriptionManager {
     }
 
     private func cleanupEnrollment() {
+        audioSamplesLock.lock()
+        captureDuration = 3
+        recentAudioSamples.removeAll()
+        audioSamplesLock.unlock()
         enrollingUser = nil
         isEnrolling = false
         enrollTimer?.invalidate()
@@ -561,20 +587,13 @@ class RoomTranscriptionManager {
             startedMicForEnrollment = false
             stopEnrollmentMic()
         }
+        if isListening { restartSession() }
     }
 
     /// シーケンスを中止
     func cancelEnrollmentSequence() {
         guard isEnrolling else { return }
-        isEnrolling = false
-        enrollingUser = nil
-        enrollTimer?.invalidate()
-        enrollTimer = nil
-
-        if startedMicForEnrollment {
-            startedMicForEnrollment = false
-            stopEnrollmentMic()
-        }
+        cleanupEnrollment()
         onLog?("🎤 声紋登録を中止しました")
     }
 }

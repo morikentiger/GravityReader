@@ -21,6 +21,14 @@ class VoiceProfileStore {
     var profiles: [String: VoiceProfile] = [:]
 
     var onLog: ((String) -> Void)?
+    private let profilesURL: URL
+    private var activeMode: VoiceDiarizer.Mode?
+    private var activeFeatureDimension: Int?
+
+    init(profilesURL: URL? = nil) {
+        self.profilesURL = profilesURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("GravityReader/voice_profiles.json")
+    }
 
     /// 登録済みの話者名一覧
     var registeredSpeakers: [String] {
@@ -30,13 +38,19 @@ class VoiceProfileStore {
     // MARK: - CRUD
 
     func clearProfile(for speaker: String) {
-        profiles.removeValue(forKey: speaker)
-        saveProfiles()
+        do {
+            // A user's explicit deletion applies to every stored extraction mode.
+            let remaining = try readStoredProfiles().filter { $0["name"] as? String != speaker }
+            try writeStoredProfiles(remaining)
+            profiles.removeValue(forKey: speaker)
+        } catch { reportStorageError(error) }
     }
 
     func clearAllProfiles() {
-        profiles.removeAll()
-        saveProfiles()
+        do {
+            try writeStoredProfiles([])
+            profiles.removeAll()
+        } catch { reportStorageError(error) }
     }
 
     func resetAdaptiveLearning(for speaker: String) {
@@ -49,72 +63,92 @@ class VoiceProfileStore {
 
     // MARK: - 永続化
 
-    private var profilesURL: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("GravityReader")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("voice_profiles.json")
+    private func modeName(_ mode: VoiceDiarizer.Mode) -> String {
+        mode == .neural ? "neural" : "mfcc"
+    }
+
+    private func storedModeName(_ item: [String: Any]) -> String {
+        // Older files did not have a mode and contained MFCC profiles.
+        item["mode"] as? String ?? "mfcc"
+    }
+
+    private func readStoredProfiles() throws -> [[String: Any]] {
+        guard FileManager.default.fileExists(atPath: profilesURL.path) else { return [] }
+        let data = try Data(contentsOf: profilesURL)
+        guard let records = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw NSError(domain: "VoiceProfileStore", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "声紋ファイルの形式が不正です。元のファイルは保持します。"])
+        }
+        return records
+    }
+
+    private func writeStoredProfiles(_ records: [[String: Any]]) throws {
+        let data = try JSONSerialization.data(withJSONObject: records)
+        try FileManager.default.createDirectory(at: profilesURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: profilesURL, options: .atomic)
+    }
+
+    private func reportStorageError(_ error: Error) {
+        NSLog("[VoiceProfile] プロファイル保存エラー: %@", error.localizedDescription)
+        onLog?("⚠️ 声紋プロファイル保存に失敗: \(error.localizedDescription)")
     }
 
     func saveProfiles() {
-        var data: [[String: Any]] = []
-        for (_, profile) in profiles {
-            var dict: [String: Any] = [
-                "name": profile.name,
-                "features": profile.features.map { Double($0) },
-                "featureDim": profile.features.count,
-                "sampleCount": profile.sampleCount,
-                "mode": profile.mode == .neural ? "neural" : "mfcc"
-            ]
-            if let pm = profile.pitchMean { dict["pitchMean"] = Double(pm) }
-            if let ps = profile.pitchStd { dict["pitchStd"] = Double(ps) }
-            data.append(dict)
+        let mode = activeMode ?? profiles.values.first?.mode ?? .mfcc
+        let dimension = activeFeatureDimension ?? (mode == .neural ? SpeakerEmbeddingModel.embeddingDim : MFCCFeatureExtractor().featureDimension)
+        guard dimension > 0, profiles.values.allSatisfy({ profile in
+            !profile.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            profile.mode == mode && profile.features.count == dimension &&
+            profile.features.allSatisfy(\.isFinite) && profile.sampleCount > 0 &&
+            (profile.pitchMean?.isFinite ?? true) && (profile.pitchStd?.isFinite ?? true)
+        }) else {
+            onLog?("⚠️ 不正な声紋データの保存を中止しました。保存済みデータは保持します。")
+            return
         }
         do {
-            let json = try JSONSerialization.data(withJSONObject: data)
-            guard let str = String(data: json, encoding: .utf8) else { return }
-            try str.write(to: profilesURL, atomically: true, encoding: .utf8)
-        } catch {
-            NSLog("[VoiceProfile] プロファイル保存エラー: \(error)")
-            onLog?("⚠️ 声紋プロファイル保存に失敗: \(error.localizedDescription)")
-        }
+            // Switching extractors must not erase registrations from another mode.
+            var data = try readStoredProfiles().filter { storedModeName($0) != modeName(mode) }
+            for profile in profiles.values.sorted(by: { $0.name < $1.name }) {
+                var dict: [String: Any] = [
+                    "name": profile.name,
+                    "features": profile.features.map { Double($0) },
+                    "featureDim": profile.features.count,
+                    "sampleCount": profile.sampleCount,
+                    "mode": modeName(profile.mode)
+                ]
+                if let pm = profile.pitchMean { dict["pitchMean"] = Double(pm) }
+                if let ps = profile.pitchStd { dict["pitchStd"] = Double(ps) }
+                data.append(dict)
+            }
+            try writeStoredProfiles(data)
+        } catch { reportStorageError(error) }
     }
 
     func loadProfiles(currentMode: VoiceDiarizer.Mode, featureDimension: Int) {
-        let data: Data
-        let arr: [[String: Any]]
+        activeMode = currentMode
+        activeFeatureDimension = featureDimension
+        // The active dictionary contains only compatible vectors. Inactive modes
+        // remain in the file and are merged back by saveProfiles().
+        profiles.removeAll()
+        guard featureDimension > 0 else { return }
         do {
-            data = try Data(contentsOf: profilesURL)
-            guard let parsed = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
-            arr = parsed
-        } catch {
-            // ファイルが存在しない場合は正常（初回起動時）
-            return
-        }
-
-        for item in arr {
-            guard let name = item["name"] as? String,
-                  let count = item["sampleCount"] as? Int else { continue }
-
-            let profileMode: VoiceDiarizer.Mode = (item["mode"] as? String) == "neural" ? .neural : .mfcc
-            let pitchMean = (item["pitchMean"] as? Double).map { Float($0) }
-            let pitchStd = (item["pitchStd"] as? Double).map { Float($0) }
-
-            if let feats = item["features"] as? [Double], feats.count == featureDimension, profileMode == currentMode {
-                profiles[name] = VoiceProfile(
-                    name: name,
-                    features: feats.map { Float($0) },
-                    sampleCount: count,
-                    mode: profileMode,
-                    pitchMean: pitchMean,
-                    pitchStd: pitchStd
-                )
-            } else {
-                onLog?("⚠️ \(name) の声紋は現在のモード(\(currentMode == .neural ? "neural" : "mfcc"))と互換性がないため再登録が必要です")
+            for item in try readStoredProfiles() {
+                guard storedModeName(item) == modeName(currentMode),
+                      let name = item["name"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      let count = item["sampleCount"] as? Int, count > 0,
+                      let feats = item["features"] as? [Double], feats.count == featureDimension,
+                      feats.allSatisfy({ $0.isFinite && Float($0).isFinite }) else { continue }
+                let pitchMean = (item["pitchMean"] as? Double).map { Float($0) }
+                let pitchStd = (item["pitchStd"] as? Double).map { Float($0) }
+                profiles[name] = VoiceProfile(name: name, features: feats.map { Float($0) }, sampleCount: count,
+                                             mode: currentMode, pitchMean: pitchMean?.isFinite == true ? pitchMean : nil,
+                                             pitchStd: pitchStd?.isFinite == true ? pitchStd : nil)
             }
-        }
-        if !profiles.isEmpty {
-            onLog?("🎤 声紋プロファイル読み込み(\(currentMode == .neural ? "neural" : "mfcc")): \(profiles.keys.joined(separator: ", "))")
+            if !profiles.isEmpty {
+                onLog?("🎤 声紋プロファイル読み込み(\(modeName(currentMode))): \(profiles.keys.sorted().joined(separator: ", "))")
+            }
+        } catch {
+            onLog?("⚠️ 声紋プロファイルを読み込めません。保存済みファイルは保持します。")
         }
     }
 

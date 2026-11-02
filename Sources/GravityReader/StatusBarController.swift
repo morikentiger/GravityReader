@@ -21,6 +21,8 @@ class StatusBarController {
     var onToggle: ((Bool) -> Void)?
     var onTest: (() -> Void)?
     var onShowLog: (() -> Void)?
+    var onShowSiameseStatus: (() -> Void)?
+    var onToggleSiamese: (() -> Bool)?
     var onShowStatistics: (() -> Void)?
     var onShowExperiences: (() -> Void)?
     var onDumpAXTree: (() -> Void)?
@@ -222,6 +224,14 @@ class StatusBarController {
         dumpItem.title = "アクセシビリティ診断"
         let voiceOptions = NSMenu()
         [voiceMenuItem, userVoiceMenuItem, enrollMenuItem, testItem].forEach { voiceOptions.addItem($0) }
+        voiceOptions.addItem(.separator())
+        let siameseToggle = NSMenuItem(title: "Siamese学習済み照合を使う", action: #selector(toggleSiamese(_:)), keyEquivalent: "")
+        siameseToggle.target = self
+        siameseToggle.state = (AppDefaults.suite.object(forKey: "GR_SiameseVoiceEnabled") as? Bool ?? true) ? .on : .off
+        voiceOptions.addItem(siameseToggle)
+        let siameseStatus = NSMenuItem(title: "Siamese学習の状態…", action: #selector(showSiameseStatus), keyEquivalent: "")
+        siameseStatus.target = self
+        voiceOptions.addItem(siameseStatus)
         let voiceParent = NSMenuItem(title: "音声と声紋", action: nil, keyEquivalent: "")
         voiceParent.submenu = voiceOptions
         let yuiOptions = NSMenu()
@@ -271,6 +281,14 @@ class StatusBarController {
         displayItem.submenu = displayMenu
         mainMenu.addItem(displayItem)
         NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func showSiameseStatus() {
+        DispatchQueue.main.async { [weak self] in self?.onShowSiameseStatus?() }
+    }
+    @objc private func toggleSiamese(_ sender: NSMenuItem) {
+        guard let enabled = onToggleSiamese?() else { return }
+        sender.state = enabled ? .on : .off
     }
 
     @objc private func showStatistics() {
